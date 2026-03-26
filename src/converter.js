@@ -103,11 +103,19 @@ async function getPdfPageCount(pdfPath, signal) {
     }
     fs.closeSync(fd);
 
-    const matches = [...text.matchAll(/\/Count\s+(\d+)/g)];
-    if (matches.length > 0) {
-      const total = Math.max(...matches.map((m) => parseInt(m[1], 10)));
+    // Only trust /Count values that appear inside a /Type /Pages dictionary.
+    // A bare /Count scan picks up false positives from font dicts, form fields,
+    // etc. — those can be larger than the real page count and cause workers to
+    // request pages beyond the end of the file.
+    const ctxMatches = [
+      ...text.matchAll(/\/Type\s*\/Pages[\s\S]{0,400}?\/Count\s+(\d+)/g),
+      ...text.matchAll(/\/Count\s+(\d+)[\s\S]{0,400}?\/Type\s*\/Pages/g),
+    ];
+    if (ctxMatches.length > 0) {
+      const total = Math.max(...ctxMatches.map((m) => parseInt(m[1], 10)));
       if (total > 0) return total;
     }
+    // No /Type /Pages context found — don't guess from orphaned /Count values.
   } catch { /* fall through */ }
 
   // ── Method 2: ImageMagick identify -ping ────────────────────────────────
