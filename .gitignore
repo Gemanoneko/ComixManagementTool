@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Vendored binaries (run "npm run prepare-vendor" locally after cloning)
+vendor/
+
+# Claude Code internal files
+.claude/
+
+# Word documents (design notes, not source)
+*.docx
+
+# electron-builder debug artifacts
+builder-debug.yml
+builder-effective-config.yaml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.suo
+*.user

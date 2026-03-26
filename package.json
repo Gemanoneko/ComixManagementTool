@@ -1,0 +1,51 @@
+{
+  "name": "comix-management-tool",
+  "version": "1.0.2",
+  "description": "Comic archive conversion and management tool",
+  "main": "main.js",
+  "scripts": {
+    "start":           "electron .",
+    "prepare-vendor":  "node scripts/prepare-vendor.js",
+    "dist":            "electron-builder --win portable"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.10"
+  },
+  "devDependencies": {
+    "electron":         "^29.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId":       "com.antigravity.comixmanagementtool",
+    "productName": "ComixManagementTool",
+    "copyright":   "Antigravity Projects",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**",
+      "src/**",
+      "node_modules/**",
+      "!node_modules/electron/**",
+      "!node_modules/electron-builder/**"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/7zip",
+        "to":   "7zip",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "portable": {
+      "artifactName": "ComixManagementTool-${version}-portable.exe"
+    }
+  }
+}

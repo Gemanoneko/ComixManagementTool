@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>ComixManagementTool</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- Header -->
+    <header class="app-header">
+      <span class="app-title">ComixManagementTool</span>
+      <span class="app-subtitle">Comic Archive Converter</span>
+      <span class="app-version" id="appVersion"></span>
+    </header>
+
+    <!-- Main content -->
+    <div class="main-content">
+
+      <!-- Folder panel -->
+      <section class="panel folder-panel">
+        <div class="panel-title">Source Folder</div>
+
+        <div class="preset-row">
+          <span class="preset-label">Presets:</span>
+          <button class="preset-btn" data-path="Y:\Comix">Comix</button>
+          <button class="preset-btn" data-path="Y:\Ecchi">Ecchi</button>
+          <button class="preset-btn" data-path="Y:\Ecchi Pictures">Ecchi Pictures</button>
+          <button class="preset-btn" data-path="Y:\Magazines">Magazines</button>
+          <button class="preset-btn" data-path="Y:\Manga">Manga</button>
+          <button class="preset-btn" data-path="Y:\Sexy Comics">Sexy Comics</button>
+        </div>
+
+        <div class="folder-row">
+          <input id="folderPath" type="text" class="folder-input"
+                 placeholder="Select a folder or drag and drop one here…" readonly />
+          <button id="browseBtn" class="btn btn-secondary">Browse…</button>
+        </div>
+
+        <div class="options-row">
+          <label class="toggle-wrap">
+            <input id="mangaMode" type="checkbox" />
+            <span class="toggle-track"></span>
+            <span class="toggle-text">Manga Mode</span>
+          </label>
+          <span class="mode-hint" id="modeHint">Comics naming</span>
+        </div>
+      </section>
+
+      <!-- Action bar -->
+      <div class="action-bar">
+        <button id="startBtn" class="btn btn-primary" disabled>▶  Start Conversion</button>
+        <button id="pauseBtn" class="btn btn-secondary" disabled>⏸  Pause</button>
+        <button id="cancelBtn" class="btn btn-danger" disabled>✕  Cancel</button>
+        <div id="progressWrap" class="progress-wrap hidden">
+          <div class="progress-track">
+            <div id="progressFill" class="progress-fill"></div>
+          </div>
+          <span id="progressLabel" class="progress-label">0 / 0</span>
+          <span id="etaLabel" class="eta-label"></span>
+        </div>
+      </div>
+
+      <!-- Log panel -->
+      <section class="panel log-panel">
+        <div class="log-toolbar">
+          <span class="panel-title">Log</span>
+          <button id="clearLogBtn" class="btn btn-ghost">Clear</button>
+        </div>
+        <div id="logContainer" class="log-container">
+          <span class="log-placeholder">Conversion output will appear here…</span>
+        </div>
+      </section>
+
+    </div><!-- /main-content -->
+  </div><!-- /app -->
+
+  <!-- Delete-originals modal -->
+  <div id="deleteModal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h2 class="modal-title">Delete Original Files?</h2>
+      <p class="modal-desc">
+        The following original files can be safely deleted — their
+        <strong>.cbz</strong> versions exist and are valid.
+      </p>
+      <div id="deleteList" class="delete-list"></div>
+      <div class="modal-actions">
+        <button id="skipDeleteBtn"    class="btn btn-secondary">Keep All</button>
+        <button id="confirmDeleteBtn" class="btn btn-danger">Delete All</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
