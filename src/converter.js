@@ -751,6 +751,23 @@ function reorganizeScatteredCbzs(rootDir, log) {
   }
 
   function walk(dir) {
+    // ── Pass 0: flatten exact-name self-nesting caused by previous buggy runs ─
+    // e.g. [ENG] Urotsukidoji / [ENG] Urotsukidoji / [ENG] Urotsukidoji / …
+    try {
+      let d0 = fs.readdirSync(dir, { withFileTypes: true });
+      while (d0.length === 1 && d0[0].isDirectory() && d0[0].name === path.basename(dir)) {
+        const childPath = path.join(dir, d0[0].name);
+        const childEntries = fs.readdirSync(childPath, { withFileTypes: true });
+        for (const ce of childEntries) {
+          const src = path.join(childPath, ce.name);
+          const dst = path.join(dir, ce.name);
+          if (!fs.existsSync(dst)) fs.renameSync(src, dst);
+        }
+        try { fs.rmdirSync(childPath); } catch { /* not empty — leave it */ break; }
+        d0 = fs.readdirSync(dir, { withFileTypes: true });
+      }
+    } catch { /* ignore */ }
+
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
 
@@ -765,8 +782,8 @@ function reorganizeScatteredCbzs(rootDir, log) {
       const sepIdx = base.indexOf(' - ');
       if (sepIdx === -1) continue;
       const prefix = base.slice(0, sepIdx);
-      // Guard: don't re-group if prefix equals current dir name (avoids Batman/Batman/ nesting)
-      if (prefix.toLowerCase() === stripTags(path.basename(dir)).toLowerCase()) continue;
+      // Guard: don't re-group if prefix (tag-stripped) equals current dir name (avoids nesting)
+      if (stripTags(prefix).toLowerCase() === stripTags(path.basename(dir)).toLowerCase()) continue;
       if (!p1Groups.has(prefix)) p1Groups.set(prefix, []);
       p1Groups.get(prefix).push(cbz);
     }
