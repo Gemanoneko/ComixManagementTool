@@ -7,7 +7,7 @@ const { validateCbz } = require('./validator');
 const { buildOutputName } = require('./renamer');
 const { getSevenZip, getImageMagick } = require('./tools');
 
-const PDF_DPI = 200;
+const PDF_DPI = 170;
 
 const IMAGE_EXTS = new Set([
   '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif',
@@ -212,7 +212,7 @@ async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress, 
   // -colorspace / -background / -alpha are image operators and must come after the input.
   const preInput  = ['-density', String(PDF_DPI)];
   const postInput = ['-colorspace', 'sRGB', '-background', 'white', '-alpha', 'remove', '-alpha', 'off'];
-  const quality   = ['-quality', '92'];
+  const quality   = ['-quality', '90'];
 
   // Build one task array per worker
   let tasks;
@@ -663,7 +663,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
   const ext    = path.extname(srcFile).toLowerCase();
   const srcDir = path.dirname(srcFile);
   const outDir = outputDir ?? srcDir;
-  const baseName = path.basename(srcFile, ext);
+  const baseName = path.basename(srcFile, path.extname(srcFile));
   const isPdf = ext === '.pdf';
   let pdfPages = null;
 
