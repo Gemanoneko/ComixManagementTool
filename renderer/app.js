@@ -180,6 +180,13 @@ function appendLog(msg, type = 'info') {
   const placeholder = logContainer.querySelector('.log-placeholder');
   if (placeholder) placeholder.remove();
 
+  // A new section header (new file, scanning, etc.) retires the current
+  // progress slot so the next updateLastLog anchors to a fresh span.
+  if (type === 'header') {
+    logContainer.querySelectorAll('.log-progress-line')
+      .forEach((s) => s.classList.remove('log-progress-line'));
+  }
+
   const span = document.createElement('span');
   span.className = `log-${type}`;
   span.textContent = msg + '\n';
@@ -187,16 +194,18 @@ function appendLog(msg, type = 'info') {
   logContainer.scrollTop = logContainer.scrollHeight;
 }
 
-/** Replace the last log span in place — used for live PDF progress updates. */
+/** Replace the progress span in place — used for live PDF progress updates.
+ *  Tracks the span with class log-progress-line so that messages appended
+ *  after it (e.g. retry warnings) do not steal the update target. */
 function updateLastLog(msg, type = 'info') {
-  const spans = logContainer.querySelectorAll('span');
-  if (spans.length === 0) {
-    appendLog(msg, type);
-    return;
+  let target = logContainer.querySelector('span.log-progress-line');
+  if (!target) {
+    const spans = logContainer.querySelectorAll('span');
+    if (spans.length === 0) { appendLog(msg, type); return; }
+    target = spans[spans.length - 1];
   }
-  const last = spans[spans.length - 1];
-  last.className = `log-${type}`;
-  last.textContent = msg + '\n';
+  target.className = `log-${type} log-progress-line`;
+  target.textContent = msg + '\n';
   logContainer.scrollTop = logContainer.scrollHeight;
 }
 
