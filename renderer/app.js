@@ -54,7 +54,6 @@ function setFolder(folder) {
   currentFolder = folder;
   folderPathEl.value = folder;
   startBtn.disabled = isConverting;
-  updateSortBtn();
 }
 
 // ── Drag and drop ─────────────────────────────────────────────────────────────
@@ -417,9 +416,12 @@ reviewDeleteAllBtn.addEventListener('click', async () => {
 });
 
 // ── Sort Comics ───────────────────────────────────────────────────────────────
+let sortSourceFolder = null;
 let sortTargetFolder = null;
 let isSorting        = false;
 
+const sortSourcePathEl    = document.getElementById('sortSourcePath');
+const browseSortSourceBtn = document.getElementById('browseSortSourceBtn');
 const sortTargetPathEl    = document.getElementById('sortTargetPath');
 const browseSortTargetBtn = document.getElementById('browseSortTargetBtn');
 const sortBtn             = document.getElementById('sortBtn');
@@ -427,6 +429,15 @@ const sortModal           = document.getElementById('sortModal');
 const sortModalFile       = document.getElementById('sortModalFile');
 const sortModalOptions    = document.getElementById('sortModalOptions');
 const sortModalSkipBtn    = document.getElementById('sortModalSkipBtn');
+
+browseSortSourceBtn.addEventListener('click', async () => {
+  const folder = await electron.invoke('dialog:openFolder');
+  if (folder) {
+    sortSourceFolder = folder;
+    sortSourcePathEl.value = folder;
+    updateSortBtn();
+  }
+});
 
 browseSortTargetBtn.addEventListener('click', async () => {
   const folder = await electron.invoke('dialog:openFolder');
@@ -438,23 +449,24 @@ browseSortTargetBtn.addEventListener('click', async () => {
 });
 
 function updateSortBtn() {
-  sortBtn.disabled = isSorting || !currentFolder || !sortTargetFolder;
+  sortBtn.disabled = isSorting || !sortSourceFolder || !sortTargetFolder;
 }
 
 sortBtn.addEventListener('click', async () => {
-  if (!currentFolder || !sortTargetFolder || isSorting) return;
+  if (!sortSourceFolder || !sortTargetFolder || isSorting) return;
 
   isSorting = true;
   sortBtn.disabled = true;
   startBtn.disabled = true;
   browseBtn.disabled = true;
+  browseSortSourceBtn.disabled = true;
   browseSortTargetBtn.disabled = true;
   document.querySelectorAll('.preset-btn').forEach((b) => (b.disabled = true));
 
   logContainer.innerHTML = '';
 
   await electron.invoke('sort:start', {
-    sourceFolder: currentFolder,
+    sourceFolder: sortSourceFolder,
     targetFolder: sortTargetFolder,
   });
   // Result arrives via 'sort:complete'
@@ -472,6 +484,7 @@ electron.on('sort:complete', ({ moved, skipped, manual }) => {
   isSorting = false;
   startBtn.disabled = !currentFolder;
   browseBtn.disabled = false;
+  browseSortSourceBtn.disabled = false;
   browseSortTargetBtn.disabled = false;
   document.querySelectorAll('.preset-btn').forEach((b) => (b.disabled = false));
   updateSortBtn();

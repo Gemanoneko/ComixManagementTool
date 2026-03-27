@@ -53,9 +53,15 @@
         <div class="panel-divider"></div>
 
         <div class="sort-target-header">
-          <span class="panel-title-small">Sort Target Folder</span>
-          <span class="sort-target-hint">used by "Sort Comics"</span>
+          <span class="panel-title-small">Sort Comics</span>
         </div>
+        <div class="sort-row-label">Source (unsorted):</div>
+        <div class="folder-row">
+          <input id="sortSourcePath" type="text" class="folder-input"
+                 placeholder="Select source folder (unsorted comix)…" readonly />
+          <button id="browseSortSourceBtn" class="btn btn-secondary">Browse…</button>
+        </div>
+        <div class="sort-row-label">Target (sorted collection):</div>
         <div class="folder-row">
           <input id="sortTargetPath" type="text" class="folder-input"
                  placeholder="Select target folder (e.g. Y:\Comix)…" readonly />

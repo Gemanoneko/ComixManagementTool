@@ -1,72 +1,61 @@
-const AdmZip = require('adm-zip');
+const { execFile } = require('child_process');
 const path = require('path');
+const { getSevenZip } = require('./tools');
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif']);
 
-// Magic bytes for common image formats
-const SIGNATURES = {
-  '.png':  { offset: 0, bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
-  '.jpg':  { offset: 0, bytes: Buffer.from([0xff, 0xd8, 0xff]) },
-  '.jpeg': { offset: 0, bytes: Buffer.from([0xff, 0xd8, 0xff]) },
-  '.gif':  { offset: 0, bytes: Buffer.from([0x47, 0x49, 0x46]) },
-  '.webp': { offset: 0, bytes: Buffer.from([0x52, 0x49, 0x46, 0x46]) }, // RIFF
-  '.bmp':  { offset: 0, bytes: Buffer.from([0x42, 0x4d]) },
-};
-
-function hasValidSignature(buf, ext) {
-  const sig = SIGNATURES[ext];
-  if (!sig) return buf && buf.length > 0; // Unknown format: just non-empty
-  if (!buf || buf.length < sig.bytes.length) return false;
-  return buf.slice(sig.offset, sig.offset + sig.bytes.length).equals(sig.bytes);
+function execFileAsync(cmd, args) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) reject(Object.assign(err, { stderr }));
+      else resolve({ stdout, stderr });
+    });
+  });
 }
 
 /**
- * Validates a CBZ file by:
- * 1. Opening it as a zip
- * 2. Counting image entries and comparing to expectedCount
- * 3. Checking magic bytes of every image entry
+ * Validates a CBZ file using 7-Zip — no image data is loaded into Node.js RAM,
+ * and the calls are async so the Electron main-process event loop is never blocked.
+ *
+ * 1. `7z t` — tests CRC of every stored entry (stronger than magic-byte check)
+ * 2. `7z l -slt` — counts image entries and compares to expectedCount
  *
  * @param {string} cbzPath
  * @param {number} expectedCount  Number of image files that should be inside
- * @returns {{ valid: boolean, reason?: string }}
+ * @returns {Promise<{ valid: boolean, reason?: string }>}
  */
-function validateCbz(cbzPath, expectedCount) {
-  let zip;
+async function validateCbz(cbzPath, expectedCount) {
+  const sevenZip = getSevenZip();
+  if (!sevenZip) return { valid: false, reason: '7-Zip not found — cannot validate CBZ' };
+
+  // 1. Integrity test: 7-Zip computes CRC for every entry and compares to stored value.
+  //    Running async keeps the IPC event loop responsive (Cancel/Pause clicks still work).
   try {
-    zip = new AdmZip(cbzPath);
-  } catch (err) {
-    return { valid: false, reason: `Cannot open CBZ: ${err.message}` };
+    await execFileAsync(sevenZip, ['t', cbzPath]);
+  } catch {
+    return { valid: false, reason: 'Archive integrity test failed (corrupt ZIP or CRC error)' };
   }
 
-  const entries = zip.getEntries().filter((e) => !e.isDirectory);
-  const imageEntries = entries.filter((e) => {
-    const ext = path.extname(e.entryName).toLowerCase();
-    return IMAGE_EXTS.has(ext);
-  });
-
-  if (imageEntries.length === 0) {
-    return { valid: false, reason: 'CBZ contains no image files' };
+  // 2. List entries and count images (reads only ZIP metadata, not image data).
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync(sevenZip, ['l', '-slt', cbzPath]));
+  } catch {
+    return { valid: false, reason: 'Cannot list archive contents' };
   }
 
-  if (imageEntries.length !== expectedCount) {
-    return {
-      valid: false,
-      reason: `Image count mismatch: expected ${expectedCount}, found ${imageEntries.length}`,
-    };
-  }
+  const imageCount = stdout
+    .split(/\r?\n/)
+    .filter((line) => {
+      if (!line.startsWith('Path = ')) return false;
+      const ext = path.extname(line.slice(7).trim()).toLowerCase();
+      return IMAGE_EXTS.has(ext);
+    })
+    .length;
 
-  for (const entry of imageEntries) {
-    const ext = path.extname(entry.entryName).toLowerCase();
-    let data;
-    try {
-      data = entry.getData();
-    } catch (err) {
-      return { valid: false, reason: `Cannot read entry "${entry.entryName}": ${err.message}` };
-    }
-
-    if (!hasValidSignature(data, ext)) {
-      return { valid: false, reason: `Corrupted or unreadable image: ${entry.entryName}` };
-    }
+  if (imageCount === 0) return { valid: false, reason: 'CBZ contains no image files' };
+  if (imageCount !== expectedCount) {
+    return { valid: false, reason: `Image count mismatch: expected ${expectedCount}, found ${imageCount}` };
   }
 
   return { valid: true };

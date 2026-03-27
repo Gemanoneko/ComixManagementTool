@@ -2,7 +2,6 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
-const AdmZip = require('adm-zip');
 const { scanForFiles } = require('./scanner');
 const { validateCbz } = require('./validator');
 const { buildOutputName } = require('./renamer');
@@ -56,12 +55,12 @@ function formatEta(ms) {
   return r > 0 ? `${m}m ${r}s` : `${m}m`;
 }
 
-function execFilePromise(cmd, args, signal) {
+function execFilePromise(cmd, args, signal, execOpts = {}) {
   return new Promise((resolve, reject) => {
     const child = execFile(
       cmd,
       args,
-      { maxBuffer: 1024 * 1024 * 512 },
+      { maxBuffer: 1024 * 1024 * 512, ...execOpts },
       (err, stdout, stderr) => {
         if (err) reject(Object.assign(err, { stderr }));
         else resolve({ stdout, stderr });
@@ -95,13 +94,22 @@ function removeTempDir(dir) {
  * least one image entry.  Used to guard skip-if-exists logic so that a CBZ
  * left behind by a crashed/aborted previous run is detected and re-converted
  * instead of silently treated as complete.
+ *
+ * Uses 7-Zip so that large CBZs (1 GB+) are not loaded into Node.js RAM.
  */
-function canOpenCbz(cbzPath) {
+async function canOpenCbz(cbzPath) {
+  const sevenZip = getSevenZip();
+  if (!sevenZip) return false;
   try {
-    const zip = new AdmZip(cbzPath);
-    return zip.getEntries().some(
-      (e) => !e.isDirectory && IMAGE_EXTS.has(path.extname(e.entryName).toLowerCase())
-    );
+    // maxBuffer: 64 MB — archives with thousands of entries can produce large listings.
+    // Async so the Electron main-process event loop stays responsive.
+    const { stdout } = await execFilePromise(sevenZip, ['l', '-slt', cbzPath], null,
+      { maxBuffer: 64 * 1024 * 1024 });
+    return stdout.split(/\r?\n/).some((line) => {
+      if (!line.startsWith('Path = ')) return false;
+      const ext = path.extname(line.slice(7).trim()).toLowerCase();
+      return IMAGE_EXTS.has(ext);
+    });
   } catch {
     return false;
   }
@@ -136,17 +144,19 @@ async function getPdfPageCount(pdfPath, signal) {
     const stats   = fs.statSync(pdfPath);
     const readLen = Math.min(1024 * 1024, stats.size);
     const fd      = fs.openSync(pdfPath, 'r');
-
-    const tail = Buffer.alloc(readLen);
-    fs.readSync(fd, tail, 0, readLen, Math.max(0, stats.size - readLen));
-    let text = tail.toString('latin1');
-
-    if (stats.size > readLen) {
-      const head = Buffer.alloc(readLen);
-      fs.readSync(fd, head, 0, readLen, 0);
-      text = head.toString('latin1') + text;
+    let text;
+    try {
+      const tail = Buffer.alloc(readLen);
+      fs.readSync(fd, tail, 0, readLen, Math.max(0, stats.size - readLen));
+      text = tail.toString('latin1');
+      if (stats.size > readLen) {
+        const head = Buffer.alloc(readLen);
+        fs.readSync(fd, head, 0, readLen, 0);
+        text = head.toString('latin1') + text;
+      }
+    } finally {
+      fs.closeSync(fd);
     }
-    fs.closeSync(fd);
 
     // Only trust /Count values that appear inside a /Type /Pages dictionary.
     // A bare /Count scan picks up false positives from font dicts, form fields,
@@ -271,8 +281,49 @@ async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress, 
     }
   }
 
+  // After runTasks (and its missing-page retry), scan for files that exist but
+  // have corrupt/empty content and retry those pages individually.
+  async function retryCorrupted() {
+    const JPEG_SIG = Buffer.from([0xff, 0xd8, 0xff]);
+    let corrupt;
+    try {
+      corrupt = fs.readdirSync(destDir)
+        .filter((f) => /\.jpe?g$/i.test(f))
+        .flatMap((f) => {
+          const m = path.basename(f, path.extname(f)).match(/_(\d+)$/);
+          if (!m) return [];
+          const filePath = path.join(destDir, f);
+          try {
+            const stat = fs.statSync(filePath);
+            if (stat.size < 3) return [{ pageIdx: parseInt(m[1], 10), filePath }];
+            const buf = Buffer.alloc(3);
+            const fd = fs.openSync(filePath, 'r');
+            try {
+              fs.readSync(fd, buf, 0, 3, 0);
+            } finally {
+              fs.closeSync(fd);
+            }
+            if (!buf.equals(JPEG_SIG)) return [{ pageIdx: parseInt(m[1], 10), filePath }];
+          } catch { return [{ pageIdx: parseInt(m[1], 10), filePath }]; }
+          return [];
+        });
+    } catch { return; }
+
+    if (corrupt.length === 0) return;
+    log?.(`  ${corrupt.length} corrupted page(s) detected — retrying…`, 'warn');
+    for (const { pageIdx, filePath } of corrupt) {
+      if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+      try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+      await execFilePromise(imageMagick, [
+        ...preInput, `${srcFile}[${pageIdx}]`, ...postInput,
+        '-scene', String(pageIdx), ...quality, outPattern,
+      ], signal);
+    }
+  }
+
   if (!onPageProgress) {
     await runTasks();
+    await retryCorrupted();
     return;
   }
 
@@ -297,6 +348,7 @@ async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress, 
     polling = false;
     await pollPromise;
   }
+  await retryCorrupted();
 }
 
 // ─── Structure analysis ──────────────────────────────────────────────────────
@@ -515,7 +567,7 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
     if (!subHasSubdirs && !subHasArchives && subImages.length > 0) {
       // Leaf image folder → pack to CBZ at this output level
       const cbzPath = path.join(outDir, `${sub.name}.cbz`);
-      if (fs.existsSync(cbzPath) && !canOpenCbz(cbzPath)) {
+      if (fs.existsSync(cbzPath) && !(await canOpenCbz(cbzPath))) {
         log(`  WARN: Existing ${sub.name}.cbz is unreadable — re-converting…`, 'warn');
         try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
       }
@@ -523,8 +575,8 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
         log(`  SKIP (exists): ${sub.name}.cbz`, 'skip');
       } else {
         log(`  Packing → ${sub.name}.cbz  (${subImages.length} images)`, 'info');
-        packToCbz(subImages, cbzPath);
-        const v = validateCbz(cbzPath, subImages.length);
+        await packToCbz(subImages, cbzPath, signal);
+        const v = await validateCbz(cbzPath, subImages.length);
         if (v.valid) {
           log(`  ✓ Valid: ${sub.name}.cbz`, 'success');
           outputs.push(cbzPath);
@@ -546,7 +598,7 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
   if (images.length > 0) {
     const looseName = path.basename(outDir);
     const cbzPath   = path.join(outDir, `${looseName}.cbz`);
-    if (fs.existsSync(cbzPath) && !canOpenCbz(cbzPath)) {
+    if (fs.existsSync(cbzPath) && !(await canOpenCbz(cbzPath))) {
       log(`  WARN: Existing ${looseName}.cbz is unreadable — re-converting…`, 'warn');
       try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
     }
@@ -554,8 +606,8 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
       log(`  SKIP (exists): ${looseName}.cbz`, 'skip');
     } else {
       log(`  Packing loose images → ${looseName}.cbz  (${images.length} images)`, 'info');
-      packToCbz(images, cbzPath);
-      const v = validateCbz(cbzPath, images.length);
+      await packToCbz(images, cbzPath, signal);
+      const v = await validateCbz(cbzPath, images.length);
       if (v.valid) {
         log(`  ✓ Valid: ${looseName}.cbz`, 'success');
         outputs.push(cbzPath);
@@ -573,14 +625,35 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
 
 /**
  * Pack an array of image file paths into a CBZ (flat ZIP, no internal folder).
+ * Uses 7-Zip in store mode so images are never loaded into Node.js RAM.
  * Image files are stored with natural-sort ordering by filename.
  */
-function packToCbz(imageFiles, outputPath) {
-  const zip = new AdmZip();
-  for (const imgPath of imageFiles) {
-    zip.addLocalFile(imgPath, '', path.basename(imgPath));
+async function packToCbz(imageFiles, outputPath, signal) {
+  const sevenZip = getSevenZip();
+  // All files in a single pack call are in the same directory (CBZ is flat).
+  const srcDir   = path.dirname(imageFiles[0]);
+  const basenames = imageFiles.map((f) => path.basename(f));
+  // List file lives inside the temp dir (srcDir is always inside cbz_* tmpDir)
+  // so it is auto-removed by removeTempDir and by the startup orphan cleanup.
+  const listPath = path.join(srcDir, '.cbzpack.lst');
+  fs.writeFileSync(listPath, basenames.join('\n'), 'utf8');
+  try {
+    // -tzip: ZIP container  -mx=0: store (images are already compressed)
+    // cwd=srcDir: 7-Zip adds files by basename → no directory prefix in archive
+    await execFilePromise(
+      sevenZip,
+      ['a', '-tzip', '-mx=0', outputPath, `@${listPath}`],
+      signal,
+      { cwd: srcDir },
+    );
+  } catch (err) {
+    // Delete any partial output so the next run doesn't find a half-written CBZ
+    // and mistakenly treat it as valid (canOpenCbz could return true for it).
+    try { fs.unlinkSync(outputPath); } catch { /* ignore — may not exist yet */ }
+    throw;
+  } finally {
+    try { fs.unlinkSync(listPath); } catch { /* ignore */ }
   }
-  zip.writeZip(outputPath);
 }
 
 // ─── Core per-file processor ─────────────────────────────────────────────────
@@ -713,7 +786,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
       const outputPath = path.join(groupOutDir, outputName + '.cbz');
 
       if (fs.existsSync(outputPath)) {
-        if (canOpenCbz(outputPath)) {
+        if (await canOpenCbz(outputPath)) {
           log(`  SKIP (exists): ${outputName}.cbz`, 'skip');
           continue;
         }
@@ -722,10 +795,10 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
       }
 
       log(`  Packing → ${outputName}.cbz  (${group.files.length} images)`, 'info');
-      packToCbz(group.files, outputPath);
+      await packToCbz(group.files, outputPath, signal);
 
       // 5. Validate
-      const validation = validateCbz(outputPath, group.files.length);
+      const validation = await validateCbz(outputPath, group.files.length);
       if (!validation.valid) {
         log(`  ERROR: Validation failed — ${validation.reason}`, 'error');
         try { fs.unlinkSync(outputPath); } catch { /* ignore */ }
@@ -1012,11 +1085,11 @@ const CONVERTIBLE_EXTS = new Set(['.cbr', '.rar', '.zip', '.pdf']);
  *   needsReview – convertible files whose .cbz counterpart doesn't exist by name
  *                 but the folder also contains .cbz files (possible collection/split leftovers)
  */
-function findOrphanedOriginals(rootDir) {
+async function findOrphanedOriginals(rootDir) {
   const simple      = [];
   const needsReview = [];
 
-  function walk(dir) {
+  async function walk(dir) {
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
 
@@ -1039,7 +1112,7 @@ function findOrphanedOriginals(rootDir) {
       if (byExt.cbzBaseSet.has(base)) {
         // Exact match: Batman.cbr + Batman.cbz → safe to flag only if CBZ is readable
         const cbzPath = path.join(dir, path.basename(name, path.extname(name)) + '.cbz');
-        if (!canOpenCbz(cbzPath)) continue; // corrupted CBZ — leave both files alone
+        if (!(await canOpenCbz(cbzPath))) continue; // corrupted CBZ — leave both files alone
         simple.push(full);
       } else if (byExt.cbzNames.length > 0) {
         // CBZ files exist in this folder but no name match →
@@ -1053,7 +1126,7 @@ function findOrphanedOriginals(rootDir) {
     }
 
     for (const e of entries) {
-      if (e.isDirectory()) walk(path.join(dir, e.name));
+      if (e.isDirectory()) await walk(path.join(dir, e.name));
     }
   }
 
@@ -1178,7 +1251,7 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
   }
 
   // Post-scan: find pre-existing orphaned originals (from previous runs)
-  const { simple: preExisting, needsReview } = findOrphanedOriginals(rootFolder);
+  const { simple: preExisting, needsReview } = await findOrphanedOriginals(rootFolder);
 
   // Remove files already in 'converted' from preExisting (avoid duplicates)
   const convertedSet  = new Set(converted);

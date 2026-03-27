@@ -1,6 +1,25 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+
+/**
+ * Delete leftover temp files from previous crashed sessions:
+ *   cbz_*    — our own extraction temp directories
+ *   magick-* — ImageMagick scratch files (can be 1+ GB each)
+ */
+function cleanupOrphanedTempDirs() {
+  const tmpBase = os.tmpdir();
+  try {
+    for (const entry of fs.readdirSync(tmpBase, { withFileTypes: true })) {
+      const isCbz    = entry.isDirectory() && entry.name.startsWith('cbz_');
+      const isMagick = entry.isFile()      && entry.name.startsWith('magick-');
+      if (!isCbz && !isMagick) continue;
+      try { fs.rmSync(path.join(tmpBase, entry.name), { recursive: true, force: true }); }
+      catch { /* ignore locked entries */ }
+    }
+  } catch { /* ignore */ }
+}
 
 let mainWindow;
 let activeAbortController = null;
@@ -50,7 +69,10 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  cleanupOrphanedTempDirs();
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

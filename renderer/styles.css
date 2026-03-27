@@ -471,6 +471,13 @@ body {
   color: var(--text-muted);
 }
 
+.sort-row-label {
+  font-size: .72rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  margin-top: 6px;
+}
+
 .sort-target-hint {
   font-size: .72rem;
   color: var(--text-muted);
