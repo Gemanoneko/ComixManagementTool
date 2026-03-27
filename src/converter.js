@@ -332,7 +332,24 @@ function buildGroups(tmpDir, archiveBaseName, archiveParentDir) {
     const subNorm = sub.name.toLowerCase().replace(/[_\s-]/g, '');
     const archNorm = archiveBaseName.toLowerCase().replace(/[_\s-]/g, '');
     if (subNorm === archNorm) {
-      // Wrapper folder – use archive name, collect all images inside
+      // Wrapper folder — look inside before deciding
+      const inner = topLevelStructure(sub.dir);
+      if (inner.subdirs.length > 0) {
+        // Wrapper contains subdirs (e.g. chapters) — one CBZ per inner subdir to
+        // avoid filename collisions when pages are numbered per-chapter (001, 002…)
+        const groups = [];
+        for (const innerSub of inner.subdirs) {
+          const files = deepImages(innerSub.dir);
+          if (files.length > 0) {
+            groups.push({ name: innerSub.name, files, parentName: archiveBaseName, isSplit: true });
+          }
+        }
+        if (inner.loose.length > 0) {
+          groups.push({ name: archiveBaseName, files: inner.loose, parentName: archiveParentDir, isSplit: false });
+        }
+        if (groups.length > 0) return groups;
+      }
+      // Truly flat inside the wrapper — single CBZ named after the archive
       const files = deepImages(sub.dir);
       if (files.length === 0) return [];
       return [{ name: archiveBaseName, files, parentName: archiveParentDir, isSplit: false }];
