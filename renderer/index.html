@@ -49,6 +49,18 @@
           </label>
           <span class="mode-hint" id="modeHint">Comics naming</span>
         </div>
+
+        <div class="panel-divider"></div>
+
+        <div class="sort-target-header">
+          <span class="panel-title-small">Sort Target Folder</span>
+          <span class="sort-target-hint">used by "Sort Comics"</span>
+        </div>
+        <div class="folder-row">
+          <input id="sortTargetPath" type="text" class="folder-input"
+                 placeholder="Select target folder (e.g. Y:\Comix)…" readonly />
+          <button id="browseSortTargetBtn" class="btn btn-secondary">Browse…</button>
+        </div>
       </section>
 
       <!-- Action bar -->
@@ -56,6 +68,7 @@
         <button id="startBtn" class="btn btn-primary" disabled>▶  Start Conversion</button>
         <button id="pauseBtn" class="btn btn-secondary" disabled>⏸  Pause</button>
         <button id="cancelBtn" class="btn btn-danger" disabled>✕  Cancel</button>
+        <button id="sortBtn" class="btn btn-sort" disabled>⇄  Sort Comics</button>
         <div id="progressWrap" class="progress-wrap hidden">
           <div class="progress-track">
             <div id="progressFill" class="progress-fill"></div>
@@ -79,6 +92,19 @@
     </div><!-- /main-content -->
   </div><!-- /app -->
 
+  <!-- Sort-ambiguity modal -->
+  <div id="sortModal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h2 class="modal-title">Multiple Matches Found</h2>
+      <p class="modal-desc">Where should this file go?</p>
+      <p id="sortModalFile" class="sort-modal-file"></p>
+      <div id="sortModalOptions" class="sort-modal-options"></div>
+      <div class="modal-actions">
+        <button id="sortModalSkipBtn" class="btn btn-secondary">Skip this file</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Delete-originals modal -->
   <div id="deleteModal" class="modal-overlay hidden">
     <div class="modal-box">
@@ -91,6 +117,41 @@
       <div class="modal-actions">
         <button id="skipDeleteBtn"    class="btn btn-secondary">Keep All</button>
         <button id="confirmDeleteBtn" class="btn btn-danger">Delete All</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Needs-review modal -->
+  <div id="reviewModal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="review-header-row">
+        <h2 class="modal-title">Manual Review Required</h2>
+        <span id="reviewCounter" class="review-counter"></span>
+      </div>
+      <p class="modal-desc">
+        This file has <strong>no exact-name .cbz match</strong>, but other .cbz files exist in the
+        same folder. It may be a converted collection or split archive — or it may not have been
+        converted yet.
+      </p>
+      <p id="reviewFile" class="review-file"></p>
+
+      <div id="reviewLikelySection" class="review-cbz-section hidden">
+        <div class="review-cbz-label review-likely-label">Likely converted version:</div>
+        <div id="reviewLikelyList" class="review-cbz-list review-likely-list"></div>
+      </div>
+
+      <div id="reviewNoMatch" class="review-no-match hidden">
+        No likely match found — this file may not have been converted yet.
+      </div>
+
+      <p id="reviewStatus" class="review-status hidden"></p>
+
+      <div class="modal-actions">
+        <button id="reviewKeepAllBtn"   class="btn btn-secondary">Keep All Remaining</button>
+        <button id="reviewDeleteAllBtn" class="btn btn-danger">Delete All Remaining</button>
+        <button id="reviewConvertBtn"   class="btn btn-sort">Convert</button>
+        <button id="reviewKeepBtn"      class="btn btn-secondary">Keep</button>
+        <button id="reviewDeleteBtn"    class="btn btn-danger">Delete</button>
       </div>
     </div>
   </div>

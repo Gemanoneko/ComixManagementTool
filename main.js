@@ -137,6 +137,78 @@ ipcMain.handle('conversion:cancel', () => {
   }
 });
 
+// ── Sort Comics ───────────────────────────────────────────────────────────────
+let sortAbortController       = null;
+let pendingSortChoiceResolve  = null;
+
+ipcMain.handle('sort:start', async (event, { sourceFolder, targetFolder }) => {
+  sortAbortController = new AbortController();
+  const signal = sortAbortController.signal;
+
+  const sendLog = (msg, type = 'info') => {
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sort:log', { msg, type });
+    }
+  };
+
+  const onAmbiguous = (filePath, matches) => {
+    return new Promise((resolve) => {
+      pendingSortChoiceResolve = resolve;
+      if (!mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('sort:ambiguous', {
+          file:    require('path').basename(filePath),
+          matches: matches.map((m) => ({ label: require('path').basename(m), fullPath: m })),
+        });
+      }
+    });
+  };
+
+  try {
+    const { startSort } = require('./src/sorter');
+    const result = await startSort({ sourceFolder, targetFolder }, sendLog, onAmbiguous, signal);
+    if (!mainWindow.isDestroyed()) mainWindow.webContents.send('sort:complete', result);
+  } catch (err) {
+    sendLog(`Fatal error: ${err.message}`, 'error');
+    if (!mainWindow.isDestroyed()) mainWindow.webContents.send('sort:complete', { moved: 0, skipped: 0, manual: 0 });
+  } finally {
+    sortAbortController      = null;
+    pendingSortChoiceResolve = null;
+  }
+});
+
+ipcMain.handle('sort:choice', (event, { choice }) => {
+  if (pendingSortChoiceResolve) {
+    const resolve = pendingSortChoiceResolve;
+    pendingSortChoiceResolve = null;
+    resolve(choice); // choice is a folder path string, or null to skip
+  }
+});
+
+ipcMain.handle('sort:cancel', () => {
+  if (pendingSortChoiceResolve) {
+    const resolve = pendingSortChoiceResolve;
+    pendingSortChoiceResolve = null;
+    resolve(null);
+  }
+  sortAbortController?.abort();
+});
+
+// Convert a single file (used by the needs-review modal)
+ipcMain.handle('conversion:convertSingle', async (event, { filePath, isManga }) => {
+  const sendLog = (msg, type = 'info', update = false) => {
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(update ? 'conversion:logUpdate' : 'conversion:log', { msg, type });
+    }
+  };
+  try {
+    const { convertSingleFile } = require('./src/converter');
+    return await convertSingleFile(filePath, isManga, sendLog, null);
+  } catch (err) {
+    sendLog(`ERROR: ${err.message}`, 'error');
+    return { success: false };
+  }
+});
+
 // Delete original files after user confirms
 ipcMain.handle('conversion:deleteOriginals', async (event, files) => {
   const results = [];

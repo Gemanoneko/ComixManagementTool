@@ -22,6 +22,31 @@ function naturalSort(a, b) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 }
 
+function normaliseName(name) {
+  return name
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/#.*/g, ' ')
+    .replace(/^the\s+/i, '')
+    .toLowerCase()
+    .replace(/[-–—_.,!?'"]/g, ' ')
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function likelyCbzMatches(srcBasename, cbzNames) {
+  const srcWords = normaliseName(srcBasename).split(' ').filter(Boolean);
+  const srcSet   = new Set(srcWords);
+  return cbzNames.filter((cbz) => {
+    const cbzWords = normaliseName(path.basename(cbz, '.cbz')).split(' ').filter(Boolean);
+    const cbzSet   = new Set(cbzWords);
+    let intersection = 0;
+    for (const w of srcSet) if (cbzSet.has(w)) intersection++;
+    const union = new Set([...srcSet, ...cbzSet]).size;
+    return union > 0 && (intersection / union) >= 0.5;
+  });
+}
+
 function formatEta(ms) {
   const s = Math.round(ms / 1000);
   if (s < 10) return 'a few seconds';
@@ -656,24 +681,32 @@ function findOrphanedOriginals(rootDir) {
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
 
     // Collect files in this directory by extension
-    const byExt = { src: [], cbz: new Set() };
+    const byExt = { src: [], cbzNames: [], cbzBaseSet: new Set() };
     for (const e of entries) {
       if (!e.isFile()) continue;
       const ext = path.extname(e.name).toLowerCase();
-      if (ext === '.cbz') byExt.cbz.add(path.basename(e.name, '.cbz').toLowerCase());
-      else if (CONVERTIBLE_EXTS.has(ext)) byExt.src.push(e.name);
+      if (ext === '.cbz') {
+        byExt.cbzNames.push(e.name);
+        byExt.cbzBaseSet.add(path.basename(e.name, '.cbz').toLowerCase());
+      } else if (CONVERTIBLE_EXTS.has(ext)) {
+        byExt.src.push(e.name);
+      }
     }
 
     for (const name of byExt.src) {
       const base = path.basename(name, path.extname(name)).toLowerCase();
       const full = path.join(dir, name);
-      if (byExt.cbz.has(base)) {
+      if (byExt.cbzBaseSet.has(base)) {
         // Exact match: Batman.cbr + Batman.cbz → safe to flag
         simple.push(full);
-      } else if (byExt.cbz.size > 0) {
+      } else if (byExt.cbzNames.length > 0) {
         // CBZ files exist in this folder but no name match →
         // could be a collection archive or split archive that wasn't cleaned up
-        needsReview.push(full);
+        needsReview.push({
+          file: full,
+          nearbyCbzs:    byExt.cbzNames.slice(),
+          likelyMatches: likelyCbzMatches(path.basename(name, path.extname(name)), byExt.cbzNames),
+        });
       }
     }
 
@@ -752,10 +785,14 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
   }
   if (needsReview.length > 0) {
     log(`Found ${needsReview.length} file(s) that may be collection/split-archive leftovers — review manually.`, 'warn');
-    for (const f of needsReview) log(`  ? ${path.relative(rootFolder, f)}`, 'skip');
+    for (const item of needsReview) log(`  ? ${path.relative(rootFolder, item.file)}`, 'skip');
   }
 
   return { converted, preExisting: uniquePreExisting, needsReview };
 }
 
-module.exports = { startConversion };
+async function convertSingleFile(filePath, isManga, log, signal) {
+  return processFile(filePath, isManga, log, signal);
+}
+
+module.exports = { startConversion, convertSingleFile };

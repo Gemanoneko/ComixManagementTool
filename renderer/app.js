@@ -11,6 +11,8 @@ let currentFolder    = null;
 let isConverting     = false;
 let isPaused         = false;
 let pendingOriginals = [];
+let pendingReview    = [];
+let reviewIndex      = 0;
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const folderPathEl    = document.getElementById('folderPath');
@@ -52,6 +54,7 @@ function setFolder(folder) {
   currentFolder = folder;
   folderPathEl.value = folder;
   startBtn.disabled = isConverting;
+  updateSortBtn();
 }
 
 // ── Drag and drop ─────────────────────────────────────────────────────────────
@@ -155,13 +158,20 @@ electron.on('conversion:progress', ({ current, total, etaMs }) => {
 electron.on('conversion:complete', (result) => {
   resetControls();
 
-  const converted   = result.converted   || [];
-  const preExisting = result.preExisting || [];
+  const converted    = result.converted   || [];
+  const preExisting  = result.preExisting || [];
+  const needsReview  = result.needsReview || [];
   const allDeletable = [...converted, ...preExisting];
+
+  pendingReview = needsReview;
+  reviewIndex   = 0;
 
   if (allDeletable.length > 0) {
     pendingOriginals = allDeletable;
     showDeleteModal(converted, preExisting);
+  } else if (needsReview.length > 0) {
+    appendLog('\nSome files need manual review:', 'warn');
+    showNextReview();
   }
 });
 
@@ -254,10 +264,227 @@ confirmDeleteBtn.addEventListener('click', async () => {
   }
   appendLog('Done.', 'success');
   pendingOriginals = [];
+  if (pendingReview.length > 0) {
+    appendLog('\nSome files need manual review:', 'warn');
+    showNextReview();
+  }
 });
 
 skipDeleteBtn.addEventListener('click', () => {
   deleteModal.classList.add('hidden');
   appendLog('\nOriginals kept.', 'info');
   pendingOriginals = [];
+  if (pendingReview.length > 0) {
+    appendLog('\nSome files need manual review:', 'warn');
+    showNextReview();
+  }
+});
+
+// ── Needs-review modal ────────────────────────────────────────────────────────
+const reviewModal         = document.getElementById('reviewModal');
+const reviewCounter       = document.getElementById('reviewCounter');
+const reviewFileEl        = document.getElementById('reviewFile');
+const reviewLikelySection = document.getElementById('reviewLikelySection');
+const reviewLikelyList    = document.getElementById('reviewLikelyList');
+const reviewNoMatch       = document.getElementById('reviewNoMatch');
+const reviewStatus        = document.getElementById('reviewStatus');
+const reviewKeepBtn       = document.getElementById('reviewKeepBtn');
+const reviewDeleteBtn     = document.getElementById('reviewDeleteBtn');
+const reviewConvertBtn    = document.getElementById('reviewConvertBtn');
+const reviewKeepAllBtn    = document.getElementById('reviewKeepAllBtn');
+const reviewDeleteAllBtn  = document.getElementById('reviewDeleteAllBtn');
+
+function showNextReview() {
+  if (reviewIndex >= pendingReview.length) {
+    reviewModal.classList.add('hidden');
+    pendingReview = [];
+    return;
+  }
+  const item = pendingReview[reviewIndex];
+  reviewCounter.textContent = `${reviewIndex + 1} of ${pendingReview.length}`;
+  reviewFileEl.textContent  = item.file;
+  reviewStatus.classList.add('hidden');
+  reviewStatus.textContent = '';
+  setReviewBusy(false);
+
+  if (item.likelyMatches && item.likelyMatches.length > 0) {
+    reviewLikelyList.innerHTML = '';
+    for (const cbz of item.likelyMatches) {
+      const div = document.createElement('div');
+      div.className   = 'review-cbz-item';
+      div.textContent = cbz;
+      reviewLikelyList.appendChild(div);
+    }
+    reviewLikelySection.classList.remove('hidden');
+    reviewNoMatch.classList.add('hidden');
+  } else {
+    reviewLikelySection.classList.add('hidden');
+    reviewNoMatch.classList.remove('hidden');
+  }
+
+  reviewModal.classList.remove('hidden');
+}
+
+function setReviewBusy(busy) {
+  reviewKeepBtn.disabled      = busy;
+  reviewDeleteBtn.disabled    = busy;
+  reviewConvertBtn.disabled   = busy;
+  reviewKeepAllBtn.disabled   = busy;
+  reviewDeleteAllBtn.disabled = busy;
+}
+
+reviewKeepBtn.addEventListener('click', () => {
+  appendLog(`  KEPT:    ${pendingReview[reviewIndex].file}`, 'info');
+  reviewIndex++;
+  showNextReview();
+});
+
+reviewDeleteBtn.addEventListener('click', async () => {
+  const file = pendingReview[reviewIndex].file;
+  const results = await electron.invoke('conversion:deleteOriginals', [file]);
+  if (results[0].success) {
+    appendLog(`  DELETED: ${file}`, 'success');
+  } else {
+    appendLog(`  FAILED:  ${file}  (${results[0].error})`, 'error');
+  }
+  reviewIndex++;
+  showNextReview();
+});
+
+reviewConvertBtn.addEventListener('click', async () => {
+  const item = pendingReview[reviewIndex];
+  setReviewBusy(true);
+  reviewStatus.textContent = 'Converting… (see log for progress)';
+  reviewStatus.className   = 'review-status review-status-info';
+
+  appendLog(`\nConverting: ${item.file}`, 'header');
+  const result = await electron.invoke('conversion:convertSingle', {
+    filePath: item.file,
+    isManga:  mangaModeEl.checked,
+  });
+
+  if (result && result.success) {
+    // Auto-delete the original and advance
+    const del = await electron.invoke('conversion:deleteOriginals', [item.file]);
+    if (del[0].success) {
+      appendLog(`  DELETED original: ${item.file}`, 'success');
+    } else {
+      appendLog(`  FAILED to delete original: ${del[0].error}`, 'error');
+    }
+    reviewIndex++;
+    showNextReview();
+  } else {
+    reviewStatus.textContent = 'Conversion failed — see log for details.';
+    reviewStatus.className   = 'review-status review-status-error';
+    setReviewBusy(false);
+    reviewConvertBtn.disabled = true; // don't retry; user can Keep or Delete
+  }
+});
+
+reviewKeepAllBtn.addEventListener('click', () => {
+  const remaining = pendingReview.length - reviewIndex;
+  appendLog(`  Kept ${remaining} remaining file(s).`, 'info');
+  reviewModal.classList.add('hidden');
+  pendingReview = [];
+});
+
+reviewDeleteAllBtn.addEventListener('click', async () => {
+  reviewModal.classList.add('hidden');
+  appendLog('  Deleting all remaining review files…', 'header');
+  const toDelete = pendingReview.slice(reviewIndex).map((item) => item.file);
+  const results  = await electron.invoke('conversion:deleteOriginals', toDelete);
+  for (const r of results) {
+    if (r.success) appendLog(`  DELETED: ${r.file}`, 'success');
+    else           appendLog(`  FAILED:  ${r.file}  (${r.error})`, 'error');
+  }
+  appendLog('Done.', 'success');
+  pendingReview = [];
+});
+
+// ── Sort Comics ───────────────────────────────────────────────────────────────
+let sortTargetFolder = null;
+let isSorting        = false;
+
+const sortTargetPathEl    = document.getElementById('sortTargetPath');
+const browseSortTargetBtn = document.getElementById('browseSortTargetBtn');
+const sortBtn             = document.getElementById('sortBtn');
+const sortModal           = document.getElementById('sortModal');
+const sortModalFile       = document.getElementById('sortModalFile');
+const sortModalOptions    = document.getElementById('sortModalOptions');
+const sortModalSkipBtn    = document.getElementById('sortModalSkipBtn');
+
+browseSortTargetBtn.addEventListener('click', async () => {
+  const folder = await electron.invoke('dialog:openFolder');
+  if (folder) {
+    sortTargetFolder = folder;
+    sortTargetPathEl.value = folder;
+    updateSortBtn();
+  }
+});
+
+function updateSortBtn() {
+  sortBtn.disabled = isSorting || !currentFolder || !sortTargetFolder;
+}
+
+sortBtn.addEventListener('click', async () => {
+  if (!currentFolder || !sortTargetFolder || isSorting) return;
+
+  isSorting = true;
+  sortBtn.disabled = true;
+  startBtn.disabled = true;
+  browseBtn.disabled = true;
+  browseSortTargetBtn.disabled = true;
+  document.querySelectorAll('.preset-btn').forEach((b) => (b.disabled = true));
+
+  logContainer.innerHTML = '';
+
+  await electron.invoke('sort:start', {
+    sourceFolder: currentFolder,
+    targetFolder: sortTargetFolder,
+  });
+  // Result arrives via 'sort:complete'
+});
+
+electron.on('sort:log', ({ msg, type }) => {
+  appendLog(msg, type);
+});
+
+electron.on('sort:ambiguous', ({ file, matches }) => {
+  showSortModal(file, matches);
+});
+
+electron.on('sort:complete', ({ moved, skipped, manual }) => {
+  isSorting = false;
+  startBtn.disabled = !currentFolder;
+  browseBtn.disabled = false;
+  browseSortTargetBtn.disabled = false;
+  document.querySelectorAll('.preset-btn').forEach((b) => (b.disabled = false));
+  updateSortBtn();
+
+  appendLog('', 'info');
+  appendLog(`Sort complete — moved: ${moved}, skipped: ${skipped}, manual: ${manual}`, 'success');
+});
+
+function showSortModal(file, matches) {
+  sortModalFile.textContent = file;
+  sortModalOptions.innerHTML = '';
+
+  for (const m of matches) {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sort-option';
+    btn.textContent = m.label;
+    btn.title = m.fullPath;
+    btn.addEventListener('click', () => {
+      sortModal.classList.add('hidden');
+      electron.invoke('sort:choice', { choice: m.fullPath });
+    });
+    sortModalOptions.appendChild(btn);
+  }
+
+  sortModal.classList.remove('hidden');
+}
+
+sortModalSkipBtn.addEventListener('click', () => {
+  sortModal.classList.add('hidden');
+  electron.invoke('sort:choice', { choice: null });
 });

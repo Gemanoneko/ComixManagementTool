@@ -378,6 +378,152 @@ body {
   justify-content: flex-end;
 }
 
+/* ── Needs-review modal ─────────────────────────────────────────────────── */
+.review-header-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.review-counter {
+  font-size: .72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.review-file {
+  font-family: var(--mono);
+  font-size: .82rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  word-break: break-all;
+}
+
+.review-cbz-section { display: flex; flex-direction: column; gap: 6px; }
+
+.review-cbz-label {
+  font-size: .72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  color: var(--text-muted);
+}
+
+.review-cbz-list {
+  max-height: 180px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: .78rem;
+  line-height: 1.8;
+}
+
+.review-cbz-item { color: var(--success); }
+
+.review-likely-label { color: var(--success); }
+
+.review-likely-list { border-color: #2a5c3a; }
+
+.review-no-match {
+  font-size: .82rem;
+  color: var(--warn);
+  font-style: italic;
+}
+
+.review-status {
+  font-size: .82rem;
+  font-style: italic;
+  padding: 4px 0;
+}
+
+.review-status-info  { color: var(--text-muted); }
+.review-status-error { color: var(--error); }
+
+/* ── Sort target section ────────────────────────────────────────────────── */
+.panel-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 12px 0;
+}
+
+.sort-target-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.panel-title-small {
+  font-size: .72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+}
+
+.sort-target-hint {
+  font-size: .72rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.btn-sort {
+  background: #1e4d7a;
+  color: #82caff;
+  border: 1px solid #2a6aab;
+}
+
+.btn-sort:not(:disabled):hover { opacity: .85; }
+
+/* ── Sort ambiguity modal ───────────────────────────────────────────────── */
+.sort-modal-file {
+  font-family: var(--mono);
+  font-size: .82rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  word-break: break-all;
+}
+
+.sort-modal-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.btn-sort-option {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 8px 14px;
+  font-size: .84rem;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color .15s, color .15s, background .15s;
+}
+
+.btn-sort-option:hover {
+  border-color: #2a6aab;
+  color: #82caff;
+  background: #1a2a3a;
+}
+
 /* ── Utilities ──────────────────────────────────────────────────────────── */
 .hidden { display: none !important; }
 
