@@ -812,18 +812,32 @@ function reorganizeScatteredCbzs(rootDir, log) {
     // variants (v01 02 / v01-02 — hyphens vs spaces treated as equivalent).
     const dirWords0 = wordsOf(path.basename(dir));
     try {
-      let d0 = fs.readdirSync(dir, { withFileTypes: true });
-      while (d0.length === 1 && d0[0].isDirectory() &&
-             wordsOf(d0[0].name).join(' ') === dirWords0.join(' ')) {
-        const childPath = path.join(dir, d0[0].name);
-        const childEntries = fs.readdirSync(childPath, { withFileTypes: true });
-        for (const ce of childEntries) {
-          const src = path.join(childPath, ce.name);
+      // Walk to the deepest same-named single-child directory
+      let deepest = dir;
+      while (true) {
+        let d0;
+        try { d0 = fs.readdirSync(deepest, { withFileTypes: true }); } catch { break; }
+        if (d0.length !== 1 || !d0[0].isDirectory()) break;
+        if (wordsOf(d0[0].name).join(' ') !== dirWords0.join(' ')) break;
+        deepest = path.join(deepest, d0[0].name);
+      }
+      if (path.resolve(deepest) !== path.resolve(dir)) {
+        // Move deepest's contents directly into dir
+        let contentEntries;
+        try { contentEntries = fs.readdirSync(deepest, { withFileTypes: true }); } catch { contentEntries = []; }
+        for (const ce of contentEntries) {
+          const src = path.join(deepest, ce.name);
           const dst = path.join(dir, ce.name);
-          if (!fs.existsSync(dst)) fs.renameSync(src, dst);
+          if (!fs.existsSync(dst)) {
+            try { fs.renameSync(src, dst); } catch { /* ignore */ }
+          }
         }
-        try { fs.rmdirSync(childPath); } catch { /* not empty — leave it */ break; }
-        d0 = fs.readdirSync(dir, { withFileTypes: true });
+        // Delete the now-empty intermediate chain upward to (but not including) dir
+        let toDelete = deepest;
+        while (path.resolve(toDelete) !== path.resolve(dir)) {
+          try { fs.rmdirSync(toDelete); } catch { break; }
+          toDelete = path.dirname(toDelete);
+        }
       }
     } catch { /* ignore */ }
 
