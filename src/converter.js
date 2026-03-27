@@ -696,13 +696,14 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
  * Walk rootDir and move CBZs that belong to a multi-chapter archive into a
  * named subfolder.
  *
- * Detection rule: a CBZ whose base name starts with "<archiveName> - " (the
- * separator our renamer always uses for split groups) is considered an output
- * of that archive.  Two or more such CBZs in the same directory as the archive
- * → move them all into  <dir>/<archiveName>/.
+ * Detection rule: group CBZs in each directory by the prefix before their
+ * first " - " separator (e.g. "[ENG] La Blue Girl" from
+ * "[ENG] La Blue Girl - vol.1.cbz").  If a group has 2+ CBZs they are moved
+ * into  <dir>/<prefix>/.  This works even when the original archive has
+ * already been deleted.
  *
- * Single-CBZ outputs (the archive's base name === the CBZ's base name) are
- * already handled by findOrphanedOriginals and are intentionally left flat.
+ * Single-CBZ outputs have no " - " separator (or are the only member of their
+ * group) and are left flat.
  */
 function reorganizeScatteredCbzs(rootDir, log) {
   let moved = 0;
@@ -711,36 +712,38 @@ function reorganizeScatteredCbzs(rootDir, log) {
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
 
-    const archiveBases = entries
-      .filter((e) => e.isFile() && CONVERTIBLE_EXTS.has(path.extname(e.name).toLowerCase()))
-      .map((e) => path.basename(e.name, path.extname(e.name)));
-
     const cbzFiles = entries
       .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.cbz')
       .map((e) => e.name);
 
-    for (const archBase of archiveBases) {
-      const prefix   = archBase.toLowerCase() + ' - ';
-      const matching = cbzFiles.filter((cbz) =>
-        path.basename(cbz, '.cbz').toLowerCase().startsWith(prefix)
-      );
+    // Group by prefix (everything before the first " - ")
+    const groups = new Map();
+    for (const cbz of cbzFiles) {
+      const base   = path.basename(cbz, '.cbz');
+      const sepIdx = base.indexOf(' - ');
+      if (sepIdx === -1) continue; // no separator → not a split-output name
+      const prefix = base.slice(0, sepIdx);
+      if (!groups.has(prefix)) groups.set(prefix, []);
+      groups.get(prefix).push(cbz);
+    }
 
-      if (matching.length < 2) continue; // 0 or 1 → nothing to reorganize
+    for (const [prefix, cbzList] of groups) {
+      if (cbzList.length < 2) continue; // single CBZ → leave flat
 
-      const destDir = path.join(dir, archBase);
+      const destDir = path.join(dir, prefix);
       try { fs.mkdirSync(destDir, { recursive: true }); } catch { continue; }
 
-      for (const cbz of matching) {
+      for (const cbz of cbzList) {
         const src = path.join(dir, cbz);
         const dst = path.join(destDir, cbz);
         if (fs.existsSync(dst)) {
-          // Destination already exists — the stray root copy is redundant; delete it
+          // Already in the right place — remove the stray root copy
           try { fs.unlinkSync(src); } catch { /* ignore */ }
           continue;
         }
         try {
           fs.renameSync(src, dst);
-          log(`  Moved: ${cbz}  →  ${archBase}\\`, 'info');
+          log(`  Moved: ${cbz}  →  ${prefix}\\`, 'info');
           moved++;
         } catch (err) {
           if (err.code === 'EXDEV') {
@@ -872,6 +875,15 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
   const { rootFolder, isManga } = options;
 
   log(`Scanning: ${rootFolder}`, 'header');
+
+  // Reorganize scattered multi-chapter CBZs first, before converting.
+  // Runs even when there are no archives to convert — just select the folder
+  // and click Start Conversion to reorganize CBZ-only folders.
+  const preReorganized = reorganizeScatteredCbzs(rootFolder, log);
+  if (preReorganized > 0) {
+    log(`Reorganized ${preReorganized} CBZ(s) into subfolders.\n`, 'info');
+  }
+
   const files = scanForFiles(rootFolder);
 
   if (files.length === 0) {
@@ -880,13 +892,6 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
   }
 
   log(`Found ${files.length} file(s) to convert.\n`, 'info');
-
-  // Reorganize any CBZs scattered in root from a previous run before converting,
-  // so that the skip-if-exists check finds them in the correct subfolder location.
-  const preReorganized = reorganizeScatteredCbzs(rootFolder, log);
-  if (preReorganized > 0) {
-    log(`Reorganized ${preReorganized} CBZ(s) into subfolders.\n`, 'info');
-  }
 
   const converted     = []; // converted successfully in this run
   const fileDurations = [];
