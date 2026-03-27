@@ -188,8 +188,30 @@ async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress) 
     tasks = [[...preInput, srcFile, ...postInput, ...quality, outPattern]];
   }
 
+  // Run workers, then fall back to serial if any chunk reported pages-out-of-range.
+  // Uses allSettled so all workers complete before we decide whether to retry.
+  async function runTasks() {
+    if (tasks.length === 1) {
+      await execFilePromise(imageMagick, tasks[0], signal);
+      return;
+    }
+    const results = await Promise.allSettled(tasks.map((args) => execFilePromise(imageMagick, args, signal)));
+    const failures = results.filter((r) => r.status === 'rejected');
+    if (failures.length === 0) return;
+    if (failures.some((r) => r.reason?.name === 'AbortError')) {
+      throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+    }
+    // Page count was wrong — clear any partial output and retry as one serial process
+    try {
+      for (const f of fs.readdirSync(destDir).filter((f) => /\.(jpg|jpeg|png)$/i.test(f))) {
+        try { fs.unlinkSync(path.join(destDir, f)); } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+    await execFilePromise(imageMagick, [...preInput, srcFile, ...postInput, ...quality, outPattern], signal);
+  }
+
   if (!onPageProgress) {
-    await Promise.all(tasks.map((args) => execFilePromise(imageMagick, args, signal)));
+    await runTasks();
     return;
   }
 
@@ -209,7 +231,7 @@ async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress) 
 
   const pollPromise = pollLoop();
   try {
-    await Promise.all(tasks.map((args) => execFilePromise(imageMagick, args, signal)));
+    await runTasks();
   } finally {
     polling = false;
     await pollPromise;
