@@ -693,67 +693,133 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
 // ─── Reorganise scattered multi-chapter CBZs ─────────────────────────────────
 
 /**
- * Walk rootDir and move CBZs that belong to a multi-chapter archive into a
- * named subfolder.
+ * Walk rootDir and reorganize scattered multi-chapter CBZs and cross-language
+ * duplicates into named subfolders.
  *
- * Detection rule: group CBZs in each directory by the prefix before their
- * first " - " separator (e.g. "[ENG] La Blue Girl" from
- * "[ENG] La Blue Girl - vol.1.cbz").  If a group has 2+ CBZs they are moved
- * into  <dir>/<prefix>/.  This works even when the original archive has
- * already been deleted.
+ * Two passes per directory:
  *
- * Single-CBZ outputs have no " - " separator (or are the only member of their
- * group) and are left flat.
+ * Pass 1 — split-output grouping:
+ *   CBZs sharing the same prefix before their first " - " separator are moved
+ *   into  <dir>/<prefix>/.  Works even if the original archive is gone.
+ *   Example: "[ENG] Adventure Kid - vol.1.cbz" + "vol.2.cbz"
+ *            → "[ENG] Adventure Kid\" folder
+ *
+ * Pass 2 — cross-language / tag grouping:
+ *   CBZ files AND subdirectories are grouped by their "core title" (leading
+ *   [LANG]/[TAG] brackets stripped).  Items whose core titles share a
+ *   word-prefix are moved into a tag-free folder named after the shortest
+ *   core title in the group.
+ *   Example: "[ENG] Urotsukidoji\" folder + "[RUS] Urotsukidoji vol01.cbz"
+ *            → "Urotsukidoji\" folder containing both
  */
 function reorganizeScatteredCbzs(rootDir, log) {
   let moved = 0;
+
+  function stripTags(name) {
+    return name.replace(/^\s*(\[[^\]]*\]\s*)+/, '').trim();
+  }
+
+  function wordsOf(str) {
+    return str.toLowerCase().replace(/[-_]/g, ' ').split(/\s+/).filter(Boolean);
+  }
+
+  function moveItem(src, dst, isDir, label, folderName) {
+    if (fs.existsSync(dst)) {
+      if (!isDir) { try { fs.unlinkSync(src); } catch { /* ignore */ } }
+      return;
+    }
+    try {
+      fs.renameSync(src, dst);
+      log(`  Moved: ${label}  →  ${folderName}\\`, 'info');
+      moved++;
+    } catch (err) {
+      if (!isDir && err.code === 'EXDEV') {
+        try { fs.copyFileSync(src, dst); fs.unlinkSync(src); moved++; } catch { /* ignore */ }
+      }
+    }
+  }
 
   function walk(dir) {
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
 
+    // ── Pass 1: group CBZs by prefix before ' - ' ─────────────────────────
     const cbzFiles = entries
       .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.cbz')
       .map((e) => e.name);
 
-    // Group by prefix (everything before the first " - ")
-    const groups = new Map();
+    const p1Groups = new Map();
     for (const cbz of cbzFiles) {
       const base   = path.basename(cbz, '.cbz');
       const sepIdx = base.indexOf(' - ');
-      if (sepIdx === -1) continue; // no separator → not a split-output name
+      if (sepIdx === -1) continue;
       const prefix = base.slice(0, sepIdx);
-      if (!groups.has(prefix)) groups.set(prefix, []);
-      groups.get(prefix).push(cbz);
+      if (!p1Groups.has(prefix)) p1Groups.set(prefix, []);
+      p1Groups.get(prefix).push(cbz);
     }
 
-    for (const [prefix, cbzList] of groups) {
-      if (cbzList.length < 2) continue; // single CBZ → leave flat
-
+    for (const [prefix, list] of p1Groups) {
+      if (list.length < 2) continue;
       const destDir = path.join(dir, prefix);
       try { fs.mkdirSync(destDir, { recursive: true }); } catch { continue; }
-
-      for (const cbz of cbzList) {
-        const src = path.join(dir, cbz);
-        const dst = path.join(destDir, cbz);
-        if (fs.existsSync(dst)) {
-          // Already in the right place — remove the stray root copy
-          try { fs.unlinkSync(src); } catch { /* ignore */ }
-          continue;
-        }
-        try {
-          fs.renameSync(src, dst);
-          log(`  Moved: ${cbz}  →  ${prefix}\\`, 'info');
-          moved++;
-        } catch (err) {
-          if (err.code === 'EXDEV') {
-            try { fs.copyFileSync(src, dst); fs.unlinkSync(src); moved++; } catch { /* ignore */ }
-          }
-        }
+      for (const cbz of list) {
+        moveItem(path.join(dir, cbz), path.join(destDir, cbz), false, cbz, prefix);
       }
     }
 
-    for (const e of entries.filter((e) => e.isDirectory())) {
+    // ── Pass 2: group CBZs + folders by core title (strip [LANG] tags) ────
+    let entries2;
+    try { entries2 = fs.readdirSync(dir, { withFileTypes: true }); } catch { entries2 = []; }
+
+    const items = entries2
+      .filter((e) => (e.isFile() && path.extname(e.name).toLowerCase() === '.cbz') || e.isDirectory())
+      .map((e) => {
+        const base     = e.isDirectory() ? e.name : path.basename(e.name, '.cbz');
+        const stripped = stripTags(base);
+        return { name: e.name, isDir: e.isDirectory(), stripped, words: wordsOf(stripped) };
+      })
+      .filter((e) => e.words.length > 0);
+
+    // Group by shared word-prefix of stripped names
+    const p2Groups = []; // [{ folderName, items[] }]
+    for (const item of items) {
+      let found = null;
+      for (const grp of p2Groups) {
+        const gw = wordsOf(grp.folderName);
+        const iw = item.words;
+        const n  = Math.min(gw.length, iw.length);
+        if (n > 0 && gw.slice(0, n).every((w, i) => w === iw[i])) { found = grp; break; }
+      }
+      if (found) {
+        found.items.push(item);
+        if (item.stripped.length < found.folderName.length) found.folderName = item.stripped;
+      } else {
+        p2Groups.push({ folderName: item.stripped, items: [item] });
+      }
+    }
+
+    for (const { folderName, items: grpItems } of p2Groups) {
+      if (grpItems.length < 2) continue;
+      // Skip if we're already inside a folder with this core name (prevents re-grouping)
+      if (stripTags(path.basename(dir)).toLowerCase() === folderName.toLowerCase()) continue;
+
+      const toMove = grpItems.filter((i) => i.name !== folderName);
+      if (toMove.length === 0) continue;
+
+      const destDir = path.join(dir, folderName);
+      try { fs.mkdirSync(destDir, { recursive: true }); } catch { continue; }
+
+      for (const item of toMove) {
+        const src = path.join(dir, item.name);
+        if (!fs.existsSync(src)) continue; // may have been moved by Pass 1
+        moveItem(src, path.join(destDir, item.name), item.isDir, item.name, folderName);
+      }
+    }
+
+    // Recurse into subdirs (re-read for updated state after both passes)
+    let entries3;
+    try { entries3 = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries3.filter((e) => e.isDirectory())) {
       walk(path.join(dir, e.name));
     }
   }
