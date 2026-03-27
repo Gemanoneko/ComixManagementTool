@@ -751,11 +751,14 @@ function reorganizeScatteredCbzs(rootDir, log) {
   }
 
   function walk(dir) {
-    // ── Pass 0: flatten exact-name self-nesting caused by previous buggy runs ─
-    // e.g. [ENG] Urotsukidoji / [ENG] Urotsukidoji / [ENG] Urotsukidoji / …
+    // ── Pass 0: flatten self-nesting caused by previous buggy runs ───────────
+    // Catches both exact-name repeats ([ENG] X / [ENG] X) and normalisation
+    // variants (v01 02 / v01-02 — hyphens vs spaces treated as equivalent).
+    const dirWords0 = wordsOf(path.basename(dir));
     try {
       let d0 = fs.readdirSync(dir, { withFileTypes: true });
-      while (d0.length === 1 && d0[0].isDirectory() && d0[0].name === path.basename(dir)) {
+      while (d0.length === 1 && d0[0].isDirectory() &&
+             wordsOf(d0[0].name).join(' ') === dirWords0.join(' ')) {
         const childPath = path.join(dir, d0[0].name);
         const childEntries = fs.readdirSync(childPath, { withFileTypes: true });
         for (const ce of childEntries) {
@@ -782,8 +785,11 @@ function reorganizeScatteredCbzs(rootDir, log) {
       const sepIdx = base.indexOf(' - ');
       if (sepIdx === -1) continue;
       const prefix = base.slice(0, sepIdx);
-      // Guard: don't re-group if prefix (tag-stripped) equals current dir name (avoids nesting)
-      if (stripTags(prefix).toLowerCase() === stripTags(path.basename(dir)).toLowerCase()) continue;
+      // Guard: skip if prefix words are a prefix of (or equal to) the current dir name words.
+      // Uses wordsOf so "v01-02" and "v01 02" are treated as identical.
+      const prefixWords1 = wordsOf(prefix);
+      const dirWords1    = wordsOf(path.basename(dir));
+      if (commonPrefixLen(prefixWords1, dirWords1) >= prefixWords1.length) continue;
       if (!p1Groups.has(prefix)) p1Groups.set(prefix, []);
       p1Groups.get(prefix).push(cbz);
     }
@@ -803,8 +809,6 @@ function reorganizeScatteredCbzs(rootDir, log) {
     // of the other (e.g. "Batman" fully inside "Batman Beyond" → match on 1 word).
     let entries2;
     try { entries2 = fs.readdirSync(dir, { withFileTypes: true }); } catch { entries2 = []; }
-
-    const dirNameStripped = stripTags(path.basename(dir)).toLowerCase();
 
     const items = entries2
       .filter((e) => (e.isFile() && path.extname(e.name).toLowerCase() === '.cbz') || e.isDirectory())
@@ -844,8 +848,11 @@ function reorganizeScatteredCbzs(rootDir, log) {
       if (grpItems.length < 2) continue;
       const folderName = prefixTokens.join(' ');
       if (!folderName) continue;
-      // Guard: don't re-group if we're already inside a folder with this core name
-      if (dirNameStripped === folderName.toLowerCase()) continue;
+      // Guard: skip if current dir name (normalised) is a prefix of or equals the group folder name.
+      // Catches exact matches, tag variants ([ENG] X inside X), and sub-grouping (X inside X Vol).
+      const dirWords2 = wordsOf(stripTags(path.basename(dir)));
+      const fnWords2  = wordsOf(folderName);
+      if (commonPrefixLen(dirWords2, fnWords2) >= dirWords2.length) continue;
 
       // If a folder with exactly the group name already exists, use it as the container
       // (can't move a folder inside itself, so it stays and others move into it)
