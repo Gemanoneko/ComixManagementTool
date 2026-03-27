@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -191,6 +191,11 @@ ipcMain.handle('sort:cancel', () => {
     resolve(null);
   }
   sortAbortController?.abort();
+});
+
+// Open a file's containing folder in Explorer, with the file highlighted
+ipcMain.handle('shell:openFolder', (event, filePath) => {
+  shell.showItemInFolder(filePath);
 });
 
 // Convert a single file (used by the needs-review modal)

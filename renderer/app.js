@@ -281,18 +281,19 @@ skipDeleteBtn.addEventListener('click', () => {
 });
 
 // ── Needs-review modal ────────────────────────────────────────────────────────
-const reviewModal         = document.getElementById('reviewModal');
-const reviewCounter       = document.getElementById('reviewCounter');
-const reviewFileEl        = document.getElementById('reviewFile');
-const reviewLikelySection = document.getElementById('reviewLikelySection');
-const reviewLikelyList    = document.getElementById('reviewLikelyList');
-const reviewNoMatch       = document.getElementById('reviewNoMatch');
-const reviewStatus        = document.getElementById('reviewStatus');
-const reviewKeepBtn       = document.getElementById('reviewKeepBtn');
-const reviewDeleteBtn     = document.getElementById('reviewDeleteBtn');
-const reviewConvertBtn    = document.getElementById('reviewConvertBtn');
-const reviewKeepAllBtn    = document.getElementById('reviewKeepAllBtn');
-const reviewDeleteAllBtn  = document.getElementById('reviewDeleteAllBtn');
+const reviewModal          = document.getElementById('reviewModal');
+const reviewCounter        = document.getElementById('reviewCounter');
+const reviewFileEl         = document.getElementById('reviewFile');
+const reviewLikelySection  = document.getElementById('reviewLikelySection');
+const reviewLikelyList     = document.getElementById('reviewLikelyList');
+const reviewNoMatch        = document.getElementById('reviewNoMatch');
+const reviewStatus         = document.getElementById('reviewStatus');
+const reviewKeepBtn        = document.getElementById('reviewKeepBtn');
+const reviewDeleteBtn      = document.getElementById('reviewDeleteBtn');
+const reviewConvertBtn     = document.getElementById('reviewConvertBtn');
+const reviewOpenFolderBtn  = document.getElementById('reviewOpenFolderBtn');
+const reviewKeepAllBtn     = document.getElementById('reviewKeepAllBtn');
+const reviewDeleteAllBtn   = document.getElementById('reviewDeleteAllBtn');
 
 function showNextReview() {
   if (reviewIndex >= pendingReview.length) {
@@ -326,12 +327,17 @@ function showNextReview() {
 }
 
 function setReviewBusy(busy) {
-  reviewKeepBtn.disabled      = busy;
-  reviewDeleteBtn.disabled    = busy;
-  reviewConvertBtn.disabled   = busy;
-  reviewKeepAllBtn.disabled   = busy;
-  reviewDeleteAllBtn.disabled = busy;
+  reviewKeepBtn.disabled       = busy;
+  reviewDeleteBtn.disabled     = busy;
+  reviewConvertBtn.disabled    = busy;
+  reviewOpenFolderBtn.disabled = busy;
+  reviewKeepAllBtn.disabled    = busy;
+  reviewDeleteAllBtn.disabled  = busy;
 }
+
+reviewOpenFolderBtn.addEventListener('click', () => {
+  electron.invoke('shell:openFolder', pendingReview[reviewIndex].file);
+});
 
 reviewKeepBtn.addEventListener('click', () => {
   appendLog(`  KEPT:    ${pendingReview[reviewIndex].file}`, 'info');

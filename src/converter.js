@@ -548,6 +548,8 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
   const srcDir = path.dirname(srcFile);
   const outDir = outputDir ?? srcDir;
   const baseName = path.basename(srcFile, ext);
+  const isPdf = ext === '.pdf';
+  let pdfPages = null;
 
   const tmpDir = makeTempDir();
 
@@ -596,6 +598,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
 
         const finalCount = fs.readdirSync(tmpDir)
           .filter((f) => /\.(jpg|jpeg|png)$/i.test(f)).length;
+        pdfPages = finalCount;
         const countNote = (totalPages && finalCount !== totalPages)
           ? ` (estimated ${totalPages}, actual ${finalCount})`
           : '';
@@ -625,9 +628,9 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
       const outputs = await processDirectoryTree(contentDir, wrapperOutDir, isManga, log, signal);
       if (outputs.length === 0) {
         log('  WARNING: No output produced from hierarchical archive', 'warn');
-        return { success: false };
+        return { success: false, outcome: 'noImages', isPdf, pdfPages };
       }
-      return { success: true, outputs };
+      return { success: true, outcome: 'hierarchical', outputs, folderName: baseName, isPdf, pdfPages };
     }
 
     // 3. Simple structure → image / folder packing
@@ -636,7 +639,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
 
     if (groups.length === 0) {
       log('  WARNING: No images found inside archive', 'warn');
-      return { success: false };
+      return { success: false, outcome: 'noImages', isPdf, pdfPages };
     }
 
     if (groups.length > 1) {
@@ -665,14 +668,16 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
       if (!validation.valid) {
         log(`  ERROR: Validation failed — ${validation.reason}`, 'error');
         try { fs.unlinkSync(outputPath); } catch { /* ignore */ }
-        return { success: false };
+        return { success: false, outcome: 'validationFailed', reason: validation.reason, isPdf, pdfPages };
       }
 
       log(`  ✓ Valid: ${outputName}.cbz`, 'success');
       outputs.push(outputPath);
     }
 
-    return { success: outputs.length > 0, outputs };
+    const outcome = outputs.length === 0 ? 'allSkipped'
+      : outputs.length === 1 ? 'single' : 'multi';
+    return { success: outputs.length > 0, outcome, outputs, isPdf, pdfPages };
 
   } finally {
     removeTempDir(tmpDir);
@@ -740,6 +745,51 @@ function findOrphanedOriginals(rootDir) {
   return { simple, needsReview };
 }
 
+// ─── Conversion summary ──────────────────────────────────────────────────────
+
+function logSummary(outcomes, rootFolder, log) {
+  if (outcomes.length === 0) return;
+  log('\n── Conversion Summary ───────────────────────────────────', 'header');
+  for (const { file, result, error } of outcomes) {
+    const rel    = path.relative(rootFolder, file);
+    const { outcome, outputs = [], folderName, reason, isPdf, pdfPages } = result || {};
+    const pdfTag = isPdf && pdfPages ? `  [PDF · ${pdfPages} pages]` : '';
+
+    if (error) {
+      log(`  ✗  ${rel}  →  ERROR: ${error}`, 'error');
+      continue;
+    }
+
+    switch (outcome) {
+      case 'single':
+        log(`  ✓  ${rel}  →  ${path.basename(outputs[0])}${pdfTag}`, 'success');
+        break;
+      case 'multi': {
+        const names   = outputs.map((o) => path.basename(o, '.cbz'));
+        const preview = names.length <= 3
+          ? names.join(', ')
+          : `${names.slice(0, 2).join(', ')}, … +${names.length - 2} more`;
+        log(`  ✓  ${rel}  →  ${outputs.length} CBZs: ${preview}${pdfTag}`, 'success');
+        break;
+      }
+      case 'hierarchical':
+        log(`  ✓  ${rel}  →  ${outputs.length} CBZs in ${folderName}\\${pdfTag}`, 'success');
+        break;
+      case 'allSkipped':
+        log(`  →  ${rel}  →  skipped (CBZ already exists)`, 'skip');
+        break;
+      case 'validationFailed':
+        log(`  ✗  ${rel}  →  validation failed — ${reason}`, 'error');
+        break;
+      case 'noImages':
+        log(`  ✗  ${rel}  →  no images found`, 'error');
+        break;
+      default:
+        log(`  ✗  ${rel}  →  failed`, 'error');
+    }
+  }
+}
+
 // ─── Main entry point ────────────────────────────────────────────────────────
 
 async function startConversion(options, log, progress, signal, waitIfPaused) {
@@ -755,8 +805,9 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
 
   log(`Found ${files.length} file(s) to convert.\n`, 'info');
 
-  const converted    = []; // converted successfully in this run
+  const converted     = []; // converted successfully in this run
   const fileDurations = [];
+  const outcomes      = []; // per-file outcome for summary
 
   for (let i = 0; i < files.length; i++) {
     if (signal?.aborted) break;
@@ -777,9 +828,11 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
     try {
       const result = await processFile(file, isManga, log, signal);
       if (result.success) converted.push(file);
+      outcomes.push({ file, result });
     } catch (err) {
       if (err.name === 'AbortError') break;
       log(`  ERROR: ${err.message}`, 'error');
+      outcomes.push({ file, error: err.message });
     }
 
     fileDurations.push(Date.now() - fileStart);
@@ -793,6 +846,8 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
     ? `\nStopped. ${converted.length} file(s) converted before cancel.`
     : `\nDone. ${converted.length} of ${files.length} file(s) converted successfully.`;
   log(summary, converted.length > 0 ? 'success' : 'info');
+
+  if (!signal?.aborted) logSummary(outcomes, rootFolder, log);
 
   // Post-scan: find pre-existing orphaned originals (from previous runs)
   const { simple: preExisting, needsReview } = findOrphanedOriginals(rootFolder);
