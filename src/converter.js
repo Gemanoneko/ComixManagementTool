@@ -169,10 +169,11 @@ async function getPdfPageCount(pdfPath, signal) {
     if (im) {
       const { stdout } = await execFilePromise(
         im,
-        ['identify', '-ping', '-format', '%n\n', `${pdfPath}[0]`],
+        ['identify', '-ping', '-format', '%n\n', pdfPath],
         signal
       );
-      const n = parseInt(stdout.trim(), 10);
+      // %n = total pages in sequence, reported once per page — first line is enough.
+      const n = parseInt(stdout.trim().split('\n')[0], 10);
       if (Number.isFinite(n) && n > 0) return n;
     }
   } catch { /* give up */ }
