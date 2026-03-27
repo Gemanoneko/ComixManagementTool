@@ -854,7 +854,7 @@ function reorganizeScatteredCbzs(rootDir, log) {
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
 
     // Names containing "Art of" / "The Art of" are excluded from all grouping.
-    const ART_OF_RE = /\b(art|encyclopedia)\s+of\b|\bthe\s+(art|encyclopedia)\b/i;
+    const ART_OF_RE = /\b(art|encyclopedia|world)\s+of\b|\bthe\s+(art|encyclopedia|world)\b/i;
     const artOfTest = (s) => ART_OF_RE.test(s.replace(/[_-]/g, ' '));
 
     // ── Pass 1: group CBZs by prefix before ' - ' ─────────────────────────
