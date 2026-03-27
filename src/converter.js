@@ -231,8 +231,7 @@ async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress, 
     tasks = [[...preInput, srcFile, ...postInput, ...quality, outPattern]];
   }
 
-  // Run workers, then fall back to serial if any chunk reported pages-out-of-range.
-  // Uses allSettled so all workers complete before we decide whether to retry.
+  // Run workers; if any fail, keep what was produced and retry only the missing pages.
   async function runTasks() {
     if (tasks.length === 1) {
       await execFilePromise(imageMagick, tasks[0], signal);
@@ -244,14 +243,32 @@ async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress, 
     if (failures.some((r) => r.reason?.name === 'AbortError')) {
       throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
     }
-    // Page count was wrong — clear any partial output and retry as one serial process
-    log?.(`  Page count estimate was wrong (estimated ${totalPages}) — retrying as single process…`, 'warn');
+
+    // Determine which page indices are still missing from the output directory.
+    let produced;
     try {
-      for (const f of fs.readdirSync(destDir).filter((f) => /\.(jpg|jpeg|png)$/i.test(f))) {
-        try { fs.unlinkSync(path.join(destDir, f)); } catch { /* ignore */ }
-      }
-    } catch { /* ignore */ }
-    await execFilePromise(imageMagick, [...preInput, srcFile, ...postInput, ...quality, outPattern], signal);
+      produced = new Set(
+        fs.readdirSync(destDir)
+          .filter((f) => /\.(jpg|jpeg|png)$/i.test(f))
+          .map((f) => { const m = path.basename(f, path.extname(f)).match(/_(\d+)$/); return m ? parseInt(m[1], 10) : -1; })
+          .filter((n) => n >= 0)
+      );
+    } catch { produced = new Set(); }
+
+    const missing = [];
+    for (let i = 0; i < totalPages; i++) {
+      if (!produced.has(i)) missing.push(i);
+    }
+    if (missing.length === 0) return;
+
+    log?.(`  ${failures.length} worker(s) failed — retrying ${missing.length} missing page(s) serially…`, 'warn');
+    for (const pageIdx of missing) {
+      if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+      await execFilePromise(imageMagick, [
+        ...preInput, `${srcFile}[${pageIdx}]`, ...postInput,
+        '-scene', String(pageIdx), ...quality, outPattern,
+      ], signal);
+    }
   }
 
   if (!onPageProgress) {
