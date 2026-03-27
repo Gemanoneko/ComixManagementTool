@@ -1,6 +1,6 @@
 {
   "name": "comix-management-tool",
-  "version": "1.1.14",
+  "version": "1.1.15",
   "description": "Comic archive conversion and management tool",
   "main": "main.js",
   "scripts": {

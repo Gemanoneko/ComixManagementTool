@@ -853,6 +853,9 @@ function reorganizeScatteredCbzs(rootDir, log) {
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
 
+    // Names containing "Art of" / "The Art of" are excluded from all grouping.
+    const ART_OF_RE = /\bart\s+of\b/i;
+
     // ── Pass 1: group CBZs by prefix before ' - ' ─────────────────────────
     const cbzFiles = entries
       .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.cbz')
@@ -861,6 +864,7 @@ function reorganizeScatteredCbzs(rootDir, log) {
     const p1Groups = new Map();
     for (const cbz of cbzFiles) {
       const base   = path.basename(cbz, '.cbz');
+      if (ART_OF_RE.test(base)) continue;
       const sepIdx = base.indexOf(' - ');
       if (sepIdx === -1) continue;
       const prefix = base.slice(0, sepIdx);
@@ -898,7 +902,7 @@ function reorganizeScatteredCbzs(rootDir, log) {
         const tokens   = tokensOf(stripped);
         return { name: e.name, isDir: e.isDirectory(), stripped, words, tokens };
       })
-      .filter((e) => e.words.length > 0);
+      .filter((e) => e.words.length > 0 && !ART_OF_RE.test(e.stripped));
 
     // Build groups; track prefixWords (lowercase) + prefixTokens (original case) per group
     const p2Groups = []; // [{ prefixWords, prefixTokens, items[] }]
