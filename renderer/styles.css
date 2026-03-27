@@ -485,6 +485,14 @@ body {
 
 .btn-sort:not(:disabled):hover { opacity: .85; }
 
+.btn-convert {
+  background: var(--surface2);
+  color: #82caff;
+  border: 1px solid #2a6aab;
+}
+
+.btn-convert:not(:disabled):hover { border-color: #82caff; }
+
 /* ── Sort ambiguity modal ───────────────────────────────────────────────── */
 .sort-modal-file {
   font-family: var(--mono);

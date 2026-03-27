@@ -733,7 +733,11 @@ function reorganizeScatteredCbzs(rootDir, log) {
       for (const cbz of matching) {
         const src = path.join(dir, cbz);
         const dst = path.join(destDir, cbz);
-        if (fs.existsSync(dst)) continue; // already there
+        if (fs.existsSync(dst)) {
+          // Destination already exists — the stray root copy is redundant; delete it
+          try { fs.unlinkSync(src); } catch { /* ignore */ }
+          continue;
+        }
         try {
           fs.renameSync(src, dst);
           log(`  Moved: ${cbz}  →  ${archBase}\\`, 'info');
@@ -877,6 +881,13 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
 
   log(`Found ${files.length} file(s) to convert.\n`, 'info');
 
+  // Reorganize any CBZs scattered in root from a previous run before converting,
+  // so that the skip-if-exists check finds them in the correct subfolder location.
+  const preReorganized = reorganizeScatteredCbzs(rootFolder, log);
+  if (preReorganized > 0) {
+    log(`Reorganized ${preReorganized} CBZ(s) into subfolders.\n`, 'info');
+  }
+
   const converted     = []; // converted successfully in this run
   const fileDurations = [];
   const outcomes      = []; // per-file outcome for summary
@@ -921,11 +932,6 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
 
   if (!signal?.aborted) {
     logSummary(outcomes, rootFolder, log);
-
-    const reorganized = reorganizeScatteredCbzs(rootFolder, log);
-    if (reorganized > 0) {
-      log(`\nReorganized ${reorganized} CBZ(s) into subfolders.`, 'info');
-    }
   }
 
   // Post-scan: find pre-existing orphaned originals (from previous runs)
