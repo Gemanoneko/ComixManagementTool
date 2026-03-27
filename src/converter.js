@@ -812,16 +812,21 @@ function reorganizeScatteredCbzs(rootDir, log) {
     // variants (v01 02 / v01-02 — hyphens vs spaces treated as equivalent).
     const dirWords0 = wordsOf(path.basename(dir));
     try {
-      // Walk to the deepest same-named single-child directory
-      let deepest = dir;
-      while (true) {
-        let d0;
-        try { d0 = fs.readdirSync(deepest, { withFileTypes: true }); } catch { break; }
-        if (d0.length !== 1 || !d0[0].isDirectory()) break;
-        if (wordsOf(d0[0].name).join(' ') !== dirWords0.join(' ')) break;
-        deepest = path.join(deepest, d0[0].name);
-      }
-      if (path.resolve(deepest) !== path.resolve(dir)) {
+      // Find a same-named subdirectory among dir's children (even if other siblings exist)
+      const d0 = fs.readdirSync(dir, { withFileTypes: true });
+      const sameNameChild = d0.find(
+        (e) => e.isDirectory() && wordsOf(e.name).join(' ') === dirWords0.join(' ')
+      );
+      if (sameNameChild) {
+        // Walk from that child to the deepest same-named single-child chain
+        let deepest = path.join(dir, sameNameChild.name);
+        while (true) {
+          let dd;
+          try { dd = fs.readdirSync(deepest, { withFileTypes: true }); } catch { break; }
+          if (dd.length !== 1 || !dd[0].isDirectory()) break;
+          if (wordsOf(dd[0].name).join(' ') !== dirWords0.join(' ')) break;
+          deepest = path.join(deepest, dd[0].name);
+        }
         // Move deepest's contents directly into dir
         let contentEntries;
         try { contentEntries = fs.readdirSync(deepest, { withFileTypes: true }); } catch { contentEntries = []; }
@@ -829,7 +834,11 @@ function reorganizeScatteredCbzs(rootDir, log) {
           const src = path.join(deepest, ce.name);
           const dst = path.join(dir, ce.name);
           if (!fs.existsSync(dst)) {
-            try { fs.renameSync(src, dst); } catch { /* ignore */ }
+            try {
+              fs.renameSync(src, dst);
+              log(`  Flattened: ${ce.name}  →  ${path.basename(dir)}\\`, 'info');
+              moved++;
+            } catch { /* ignore */ }
           }
         }
         // Delete the now-empty intermediate chain upward to (but not including) dir
