@@ -173,7 +173,7 @@ async function getPdfPageCount(pdfPath, signal) {
  *
  * onPageProgress(doneCount) is called every ~600 ms while conversion runs.
  */
-async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress) {
+async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress, log) {
   const imageMagick = getImageMagick();
   if (!imageMagick) throw new Error('ImageMagick not found. Install ImageMagick 7 from imagemagick.org.');
 
@@ -227,6 +227,7 @@ async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress) 
       throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
     }
     // Page count was wrong — clear any partial output and retry as one serial process
+    log?.(`  Page count estimate was wrong (estimated ${totalPages}) — retrying as single process…`, 'warn');
     try {
       for (const f of fs.readdirSync(destDir).filter((f) => /\.(jpg|jpeg|png)$/i.test(f))) {
         try { fs.unlinkSync(path.join(destDir, f)); } catch { /* ignore */ }
@@ -574,11 +575,14 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
           log(msg, 'info', true);
         };
 
-        await extractPdf(srcFile, tmpDir, totalPages, signal, onPageProgress);
+        await extractPdf(srcFile, tmpDir, totalPages, signal, onPageProgress, log);
 
         const finalCount = fs.readdirSync(tmpDir)
           .filter((f) => /\.(jpg|jpeg|png)$/i.test(f)).length;
-        log(`  PDF extracted: ${finalCount} pages at ${PDF_DPI} DPI`, 'info', true);
+        const countNote = (totalPages && finalCount !== totalPages)
+          ? ` (estimated ${totalPages}, actual ${finalCount})`
+          : '';
+        log(`  PDF extracted: ${finalCount} pages at ${PDF_DPI} DPI${countNote}`, 'info', true);
       } finally {
         clearInterval(elapsedTick);
         elapsedTick = null;
