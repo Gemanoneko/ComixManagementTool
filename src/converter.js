@@ -734,6 +734,33 @@ function reorganizeScatteredCbzs(rootDir, log) {
     return n;
   }
 
+  // Remove trailing tokens that leave parentheses or square brackets unclosed,
+  // AND trailing tokens whose only role is to close a bracket opened earlier
+  // (e.g. "02)" with no matching "(" in the same token).
+  // Examples:
+  //   ["Series","Name","(Chapters"]   → ["Series","Name"]
+  //   ["Batman","(Vol","1)","Issue"]  → ["Batman"] (strips "Issue","1)","(Vol")
+  //   ["Korokoro","Soushi","(v01","02)","[eng]"] → unchanged (balanced)
+  function cleanPrefixTokens(tokens) {
+    function balance(toks) {
+      let p = 0, s = 0;
+      for (const t of toks) {
+        p += (t.match(/\(/g) || []).length - (t.match(/\)/g) || []).length;
+        s += (t.match(/\[/g) || []).length - (t.match(/\]/g) || []).length;
+      }
+      return { p, s };
+    }
+    const result = [...tokens];
+    let { p, s } = balance(result);
+    // Strip tokens from the end until parentheses are balanced
+    while (result.length > 0 && (p !== 0 || s !== 0)) {
+      const t = result.pop();
+      p -= (t.match(/\(/g) || []).length - (t.match(/\)/g) || []).length;
+      s -= (t.match(/\[/g) || []).length - (t.match(/\]/g) || []).length;
+    }
+    return result;
+  }
+
   function moveItem(src, dst, isDir, label, folderName) {
     if (fs.existsSync(dst)) {
       if (!isDir) { try { fs.unlinkSync(src); } catch { /* ignore */ } }
@@ -846,27 +873,32 @@ function reorganizeScatteredCbzs(rootDir, log) {
 
     for (const { prefixTokens, items: grpItems } of p2Groups) {
       if (grpItems.length < 2) continue;
-      const folderName = prefixTokens.join(' ');
-      if (!folderName) continue;
+
+      // Clean prefix: strip trailing tokens that leave unclosed parentheses/brackets,
+      // e.g. "Batman (Vol" → "Batman", "Series (Chapters" → "Series"
+      const folderName = cleanPrefixTokens([...prefixTokens]).join(' ');
+      if (!folderName || folderName.length < 2) continue;
+
       // Guard: skip if current dir name (normalised) is a prefix of or equals the group folder name.
       // Catches exact matches, tag variants ([ENG] X inside X), and sub-grouping (X inside X Vol).
       const dirWords2 = wordsOf(stripTags(path.basename(dir)));
       const fnWords2  = wordsOf(folderName);
       if (commonPrefixLen(dirWords2, fnWords2) >= dirWords2.length) continue;
 
-      // If a folder with exactly the group name already exists, use it as the container
-      // (can't move a folder inside itself, so it stays and others move into it)
-      const containerExists = grpItems.some((i) => i.isDir && i.name === folderName);
-      const toMove = containerExists ? grpItems.filter((i) => i.name !== folderName) : grpItems;
+      // If a folder matching the group name already exists (case-insensitive), use it as the
+      // container — can't move a folder inside itself, so it stays and others move into it.
+      const containerItem = grpItems.find((i) => i.isDir && i.name.toLowerCase() === folderName.toLowerCase());
+      const actualFolder  = containerItem ? containerItem.name : folderName;
+      const toMove = containerItem ? grpItems.filter((i) => i !== containerItem) : grpItems;
       if (toMove.length === 0) continue;
 
-      const destDir = path.join(dir, folderName);
+      const destDir = path.join(dir, actualFolder);
       try { fs.mkdirSync(destDir, { recursive: true }); } catch { continue; }
 
       for (const item of toMove) {
         const src = path.join(dir, item.name);
         if (!fs.existsSync(src)) continue; // may have been moved by Pass 1
-        moveItem(src, path.join(destDir, item.name), item.isDir, item.name, folderName);
+        moveItem(src, path.join(destDir, item.name), item.isDir, item.name, actualFolder);
       }
     }
 
