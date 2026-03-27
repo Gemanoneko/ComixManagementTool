@@ -6,7 +6,7 @@
   "scripts": {
     "start":           "electron .",
     "prepare-vendor":  "node scripts/prepare-vendor.js",
-    "dist":            "electron-builder --win portable"
+    "dist":            "electron-builder --win"
   },
   "dependencies": {},
   "devDependencies": {
@@ -39,11 +39,8 @@
     ],
     "win": {
       "target": [
-        { "target": "portable", "arch": ["x64"] }
+        { "target": "dir", "arch": ["x64"] }
       ]
-    },
-    "portable": {
-      "artifactName": "ComixManagementTool-${version}-portable.exe"
     }
   }
 }

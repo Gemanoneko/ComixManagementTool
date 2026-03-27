@@ -650,7 +650,7 @@ async function packToCbz(imageFiles, outputPath, signal) {
     // Delete any partial output so the next run doesn't find a half-written CBZ
     // and mistakenly treat it as valid (canOpenCbz could return true for it).
     try { fs.unlinkSync(outputPath); } catch { /* ignore — may not exist yet */ }
-    throw;
+    throw err;
   } finally {
     try { fs.unlinkSync(listPath); } catch { /* ignore */ }
   }
