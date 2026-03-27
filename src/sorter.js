@@ -27,22 +27,30 @@ function normalise(name) {
 // ─── Folder scanning ─────────────────────────────────────────────────────────
 
 /**
- * Return all immediate subdirectories of dir that have NO subdirectories
- * themselves (i.e. leaf folders where individual issues are stored).
+ * Return all subdirectories under dir (at any depth) that have NO
+ * subdirectories themselves (i.e. leaf folders where individual issues live).
+ *
+ * Recursing handles nested organisation like:
+ *   Batman/
+ *     Batman (1940)/   ← leaf
+ *     Batman (2011)/   ← leaf
  */
 function getLeafFolders(dir) {
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
 
-  return entries
-    .filter((e) => e.isDirectory())
-    .filter((e) => {
-      try {
-        const sub = fs.readdirSync(path.join(dir, e.name), { withFileTypes: true });
-        return !sub.some((se) => se.isDirectory());
-      } catch { return false; }
-    })
-    .map((e) => path.join(dir, e.name));
+  const results = [];
+  for (const e of entries.filter((e) => e.isDirectory())) {
+    const subPath = path.join(dir, e.name);
+    let sub;
+    try { sub = fs.readdirSync(subPath, { withFileTypes: true }); } catch { continue; }
+    if (sub.some((se) => se.isDirectory())) {
+      results.push(...getLeafFolders(subPath)); // intermediate — recurse
+    } else {
+      results.push(subPath); // leaf
+    }
+  }
+  return results;
 }
 
 // ─── Matching ────────────────────────────────────────────────────────────────

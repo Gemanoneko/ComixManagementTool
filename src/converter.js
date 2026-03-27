@@ -90,6 +90,23 @@ function removeTempDir(dir) {
   } catch { /* best effort */ }
 }
 
+/**
+ * Returns true if cbzPath exists, can be opened as a ZIP, and contains at
+ * least one image entry.  Used to guard skip-if-exists logic so that a CBZ
+ * left behind by a crashed/aborted previous run is detected and re-converted
+ * instead of silently treated as complete.
+ */
+function canOpenCbz(cbzPath) {
+  try {
+    const zip = new AdmZip(cbzPath);
+    return zip.getEntries().some(
+      (e) => !e.isDirectory && IMAGE_EXTS.has(path.extname(e.entryName).toLowerCase())
+    );
+  } catch {
+    return false;
+  }
+}
+
 // ─── Extraction ─────────────────────────────────────────────────────────────
 
 async function extractArchive(srcFile, destDir, signal) {
@@ -480,6 +497,10 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
     if (!subHasSubdirs && !subHasArchives && subImages.length > 0) {
       // Leaf image folder → pack to CBZ at this output level
       const cbzPath = path.join(outDir, `${sub.name}.cbz`);
+      if (fs.existsSync(cbzPath) && !canOpenCbz(cbzPath)) {
+        log(`  WARN: Existing ${sub.name}.cbz is unreadable — re-converting…`, 'warn');
+        try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
+      }
       if (fs.existsSync(cbzPath)) {
         log(`  SKIP (exists): ${sub.name}.cbz`, 'skip');
       } else {
@@ -507,6 +528,10 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
   if (images.length > 0) {
     const looseName = path.basename(outDir);
     const cbzPath   = path.join(outDir, `${looseName}.cbz`);
+    if (fs.existsSync(cbzPath) && !canOpenCbz(cbzPath)) {
+      log(`  WARN: Existing ${looseName}.cbz is unreadable — re-converting…`, 'warn');
+      try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
+    }
     if (fs.existsSync(cbzPath)) {
       log(`  SKIP (exists): ${looseName}.cbz`, 'skip');
     } else {
@@ -661,8 +686,12 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
       const outputPath = path.join(groupOutDir, outputName + '.cbz');
 
       if (fs.existsSync(outputPath)) {
-        log(`  SKIP (exists): ${outputName}.cbz`, 'skip');
-        continue;
+        if (canOpenCbz(outputPath)) {
+          log(`  SKIP (exists): ${outputName}.cbz`, 'skip');
+          continue;
+        }
+        log(`  WARN: Existing ${outputName}.cbz is unreadable — re-converting…`, 'warn');
+        try { fs.unlinkSync(outputPath); } catch { /* ignore */ }
       }
 
       log(`  Packing → ${outputName}.cbz  (${group.files.length} images)`, 'info');
@@ -953,7 +982,9 @@ function findOrphanedOriginals(rootDir) {
       const base = path.basename(name, path.extname(name)).toLowerCase();
       const full = path.join(dir, name);
       if (byExt.cbzBaseSet.has(base)) {
-        // Exact match: Batman.cbr + Batman.cbz → safe to flag
+        // Exact match: Batman.cbr + Batman.cbz → safe to flag only if CBZ is readable
+        const cbzPath = path.join(dir, path.basename(name, path.extname(name)) + '.cbz');
+        if (!canOpenCbz(cbzPath)) continue; // corrupted CBZ — leave both files alone
         simple.push(full);
       } else if (byExt.cbzNames.length > 0) {
         // CBZ files exist in this folder but no name match →
