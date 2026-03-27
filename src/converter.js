@@ -723,6 +723,17 @@ function reorganizeScatteredCbzs(rootDir, log) {
     return str.toLowerCase().replace(/[-_]/g, ' ').split(/\s+/).filter(Boolean);
   }
 
+  // Like wordsOf but preserves original capitalisation — used for folder name reconstruction
+  function tokensOf(str) {
+    return str.replace(/[-_]/g, ' ').split(/\s+/).filter(Boolean);
+  }
+
+  function commonPrefixLen(aw, bw) {
+    let n = 0;
+    while (n < aw.length && n < bw.length && aw[n] === bw[n]) n++;
+    return n;
+  }
+
   function moveItem(src, dst, isDir, label, folderName) {
     if (fs.existsSync(dst)) {
       if (!isDir) { try { fs.unlinkSync(src); } catch { /* ignore */ } }
@@ -754,6 +765,8 @@ function reorganizeScatteredCbzs(rootDir, log) {
       const sepIdx = base.indexOf(' - ');
       if (sepIdx === -1) continue;
       const prefix = base.slice(0, sepIdx);
+      // Guard: don't re-group if prefix equals current dir name (avoids Batman/Batman/ nesting)
+      if (prefix.toLowerCase() === stripTags(path.basename(dir)).toLowerCase()) continue;
       if (!p1Groups.has(prefix)) p1Groups.set(prefix, []);
       p1Groups.get(prefix).push(cbz);
     }
@@ -767,43 +780,60 @@ function reorganizeScatteredCbzs(rootDir, log) {
       }
     }
 
-    // ── Pass 2: group CBZs + folders by core title (strip [LANG] tags) ────
+    // ── Pass 2: group CBZs + folders by shared word prefix ────────────────
+    // Handles [LANG] variants (Case 1-2) AND subtitle/spin-off variations (Case 3-4).
+    // Match rule: items share ≥2 common leading words, OR one name is a full word-prefix
+    // of the other (e.g. "Batman" fully inside "Batman Beyond" → match on 1 word).
     let entries2;
     try { entries2 = fs.readdirSync(dir, { withFileTypes: true }); } catch { entries2 = []; }
+
+    const dirNameStripped = stripTags(path.basename(dir)).toLowerCase();
 
     const items = entries2
       .filter((e) => (e.isFile() && path.extname(e.name).toLowerCase() === '.cbz') || e.isDirectory())
       .map((e) => {
         const base     = e.isDirectory() ? e.name : path.basename(e.name, '.cbz');
         const stripped = stripTags(base);
-        return { name: e.name, isDir: e.isDirectory(), stripped, words: wordsOf(stripped) };
+        const words    = wordsOf(stripped);
+        const tokens   = tokensOf(stripped);
+        return { name: e.name, isDir: e.isDirectory(), stripped, words, tokens };
       })
       .filter((e) => e.words.length > 0);
 
-    // Group by shared word-prefix of stripped names
-    const p2Groups = []; // [{ folderName, items[] }]
+    // Build groups; track prefixWords (lowercase) + prefixTokens (original case) per group
+    const p2Groups = []; // [{ prefixWords, prefixTokens, items[] }]
     for (const item of items) {
-      let found = null;
+      let bestGroup = null;
+      let bestLen   = 0;
+
       for (const grp of p2Groups) {
-        const gw = wordsOf(grp.folderName);
-        const iw = item.words;
-        const n  = Math.min(gw.length, iw.length);
-        if (n > 0 && gw.slice(0, n).every((w, i) => w === iw[i])) { found = grp; break; }
+        const cp = commonPrefixLen(grp.prefixWords, item.words);
+        // qualifies if one name is entirely a prefix of the other, OR ≥2 words shared
+        const qualifies = cp > 0 && (cp >= grp.prefixWords.length || cp >= item.words.length || cp >= 2);
+        if (qualifies && cp > bestLen) { bestGroup = grp; bestLen = cp; }
       }
-      if (found) {
-        found.items.push(item);
-        if (item.stripped.length < found.folderName.length) found.folderName = item.stripped;
+
+      if (bestGroup) {
+        bestGroup.items.push(item);
+        // Narrow the stored prefix to the actual common prefix
+        bestGroup.prefixWords  = bestGroup.prefixWords.slice(0, bestLen);
+        bestGroup.prefixTokens = bestGroup.prefixTokens.slice(0, bestLen);
       } else {
-        p2Groups.push({ folderName: item.stripped, items: [item] });
+        p2Groups.push({ prefixWords: [...item.words], prefixTokens: [...item.tokens], items: [item] });
       }
     }
 
-    for (const { folderName, items: grpItems } of p2Groups) {
+    for (const { prefixTokens, items: grpItems } of p2Groups) {
       if (grpItems.length < 2) continue;
-      // Skip if we're already inside a folder with this core name (prevents re-grouping)
-      if (stripTags(path.basename(dir)).toLowerCase() === folderName.toLowerCase()) continue;
+      const folderName = prefixTokens.join(' ');
+      if (!folderName) continue;
+      // Guard: don't re-group if we're already inside a folder with this core name
+      if (dirNameStripped === folderName.toLowerCase()) continue;
 
-      const toMove = grpItems.filter((i) => i.name !== folderName);
+      // If a folder with exactly the group name already exists, use it as the container
+      // (can't move a folder inside itself, so it stays and others move into it)
+      const containerExists = grpItems.some((i) => i.isDir && i.name === folderName);
+      const toMove = containerExists ? grpItems.filter((i) => i.name !== folderName) : grpItems;
       if (toMove.length === 0) continue;
 
       const destDir = path.join(dir, folderName);
