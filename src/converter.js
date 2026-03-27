@@ -642,8 +642,13 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
       return { success: false, outcome: 'noImages', isPdf, pdfPages };
     }
 
+    // Multi-output → place CBZs inside a named subfolder to keep root clean.
+    // Single-output stays flat alongside the original archive.
+    let groupOutDir = outDir;
     if (groups.length > 1) {
-      log(`  Split into ${groups.length} archives`, 'info');
+      groupOutDir = path.join(outDir, baseName);
+      fs.mkdirSync(groupOutDir, { recursive: true });
+      log(`  Split into ${groups.length} archives → ${baseName}\\`, 'info');
     }
 
     // 4. Create a CBZ for each group
@@ -653,7 +658,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
       if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
 
       const outputName = buildOutputName(group.name, group.parentName, isManga, group.isSplit);
-      const outputPath = path.join(outDir, outputName + '.cbz');
+      const outputPath = path.join(groupOutDir, outputName + '.cbz');
 
       if (fs.existsSync(outputPath)) {
         log(`  SKIP (exists): ${outputName}.cbz`, 'skip');
@@ -675,13 +680,79 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
       outputs.push(outputPath);
     }
 
-    const outcome = outputs.length === 0 ? 'allSkipped'
+    const outcome    = outputs.length === 0 ? 'allSkipped'
       : outputs.length === 1 ? 'single' : 'multi';
-    return { success: outputs.length > 0, outcome, outputs, isPdf, pdfPages };
+    const folderName = groups.length > 1 ? baseName : null;
+    return { success: outputs.length > 0, outcome, outputs, folderName, isPdf, pdfPages };
 
   } finally {
     removeTempDir(tmpDir);
   }
+}
+
+// ─── Reorganise scattered multi-chapter CBZs ─────────────────────────────────
+
+/**
+ * Walk rootDir and move CBZs that belong to a multi-chapter archive into a
+ * named subfolder.
+ *
+ * Detection rule: a CBZ whose base name starts with "<archiveName> - " (the
+ * separator our renamer always uses for split groups) is considered an output
+ * of that archive.  Two or more such CBZs in the same directory as the archive
+ * → move them all into  <dir>/<archiveName>/.
+ *
+ * Single-CBZ outputs (the archive's base name === the CBZ's base name) are
+ * already handled by findOrphanedOriginals and are intentionally left flat.
+ */
+function reorganizeScatteredCbzs(rootDir, log) {
+  let moved = 0;
+
+  function walk(dir) {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+
+    const archiveBases = entries
+      .filter((e) => e.isFile() && CONVERTIBLE_EXTS.has(path.extname(e.name).toLowerCase()))
+      .map((e) => path.basename(e.name, path.extname(e.name)));
+
+    const cbzFiles = entries
+      .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.cbz')
+      .map((e) => e.name);
+
+    for (const archBase of archiveBases) {
+      const prefix   = archBase.toLowerCase() + ' - ';
+      const matching = cbzFiles.filter((cbz) =>
+        path.basename(cbz, '.cbz').toLowerCase().startsWith(prefix)
+      );
+
+      if (matching.length < 2) continue; // 0 or 1 → nothing to reorganize
+
+      const destDir = path.join(dir, archBase);
+      try { fs.mkdirSync(destDir, { recursive: true }); } catch { continue; }
+
+      for (const cbz of matching) {
+        const src = path.join(dir, cbz);
+        const dst = path.join(destDir, cbz);
+        if (fs.existsSync(dst)) continue; // already there
+        try {
+          fs.renameSync(src, dst);
+          log(`  Moved: ${cbz}  →  ${archBase}\\`, 'info');
+          moved++;
+        } catch (err) {
+          if (err.code === 'EXDEV') {
+            try { fs.copyFileSync(src, dst); fs.unlinkSync(src); moved++; } catch { /* ignore */ }
+          }
+        }
+      }
+    }
+
+    for (const e of entries.filter((e) => e.isDirectory())) {
+      walk(path.join(dir, e.name));
+    }
+  }
+
+  walk(rootDir);
+  return moved;
 }
 
 // ─── Orphan detection ────────────────────────────────────────────────────────
@@ -769,7 +840,8 @@ function logSummary(outcomes, rootFolder, log) {
         const preview = names.length <= 3
           ? names.join(', ')
           : `${names.slice(0, 2).join(', ')}, … +${names.length - 2} more`;
-        log(`  ✓  ${rel}  →  ${outputs.length} CBZs: ${preview}${pdfTag}`, 'success');
+        const loc = folderName ? ` in ${folderName}\\` : '';
+        log(`  ✓  ${rel}  →  ${outputs.length} CBZs${loc}: ${preview}${pdfTag}`, 'success');
         break;
       }
       case 'hierarchical':
@@ -847,7 +919,14 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
     : `\nDone. ${converted.length} of ${files.length} file(s) converted successfully.`;
   log(summary, converted.length > 0 ? 'success' : 'info');
 
-  if (!signal?.aborted) logSummary(outcomes, rootFolder, log);
+  if (!signal?.aborted) {
+    logSummary(outcomes, rootFolder, log);
+
+    const reorganized = reorganizeScatteredCbzs(rootFolder, log);
+    if (reorganized > 0) {
+      log(`\nReorganized ${reorganized} CBZ(s) into subfolders.`, 'info');
+    }
+  }
 
   // Post-scan: find pre-existing orphaned originals (from previous runs)
   const { simple: preExisting, needsReview } = findOrphanedOriginals(rootFolder);
