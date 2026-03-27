@@ -42,6 +42,9 @@ function execFilePromise(cmd, args, signal) {
         else resolve({ stdout, stderr });
       }
     );
+    // Run at below-normal priority so games and other foreground apps
+    // are never starved by ImageMagick / 7-Zip workers.
+    try { os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch { /* ignore */ }
     if (signal) {
       const onAbort = () => {
         child.kill();
@@ -238,75 +241,6 @@ function deepImages(dir) {
   return results.sort((a, b) => naturalSort(a, b));
 }
 
-/**
- * Returns archive files nested inside dir.
- *
- * Checks the top level first. If nothing is found there but there is exactly
- * one subfolder and no top-level files (a wrapper folder — common when zipping
- * a folder produces "Archive.zip\Archive\..."), looks one level deeper.
- * This handles the pattern:
- *   Collection.zip
- *   └── Collection\          ← wrapper folder, same name as zip
- *       ├── Issue 001.cbz
- *       └── Issue 002.cbz
- */
-function findNestedArchives(dir) {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-  const topArchives = entries
-    .filter((e) => e.isFile() && ARCHIVE_EXTS.has(path.extname(e.name).toLowerCase()))
-    .map((e) => path.join(dir, e.name));
-
-  if (topArchives.length > 0) return topArchives;
-
-  // Single wrapper subfolder with no top-level files → look one level deeper
-  const subdirs = entries.filter((e) => e.isDirectory());
-  const topFiles = entries.filter((e) => e.isFile());
-  if (subdirs.length === 1 && topFiles.length === 0) {
-    const innerDir = path.join(dir, subdirs[0].name);
-    return fs.readdirSync(innerDir, { withFileTypes: true })
-      .filter((e) => e.isFile() && ARCHIVE_EXTS.has(path.extname(e.name).toLowerCase()))
-      .map((e) => path.join(innerDir, e.name));
-  }
-
-  return [];
-}
-
-/**
- * Detects a "collection of collections": a dir with multiple subdirectories
- * that each contain archive files (e.g. a zip of grouped CBR batches like Lobo).
- *
- * Returns [{name, archives[]}] for each qualifying subdir, or [] if not matched.
- * Only triggered when there are NO top-level archive or image files — if anything
- * is already at the top level, the normal nested-archive path handles it.
- */
-function findSubdirCollections(dir) {
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
-
-  const hasTopContent = entries.some(
-    (e) => e.isFile() &&
-      (ARCHIVE_EXTS.has(path.extname(e.name).toLowerCase()) ||
-       IMAGE_EXTS.has(path.extname(e.name).toLowerCase()))
-  );
-  if (hasTopContent) return [];
-
-  const subdirs = entries.filter((e) => e.isDirectory());
-  if (subdirs.length === 0) return [];
-
-  const result = [];
-  for (const sub of subdirs) {
-    let subEntries;
-    try { subEntries = fs.readdirSync(path.join(dir, sub.name), { withFileTypes: true }); } catch { continue; }
-    const archives = subEntries
-      .filter((e) => e.isFile() && ARCHIVE_EXTS.has(path.extname(e.name).toLowerCase()))
-      .map((e) => path.join(dir, sub.name, e.name))
-      .sort((a, b) => naturalSort(path.basename(a), path.basename(b)));
-    if (archives.length > 0) result.push({ name: sub.name, archives });
-  }
-  return result;
-}
-
 /** Top-level entries of dir: { loose: string[], subdirs: {name,dir}[] } */
 function topLevelStructure(dir) {
   const loose = [];
@@ -374,6 +308,157 @@ function buildGroups(tmpDir, archiveBaseName, archiveParentDir) {
     groups.push({ name: archiveBaseName, files: loose, parentName: archiveParentDir, isSplit: false });
   }
   return groups;
+}
+
+// ─── Hierarchical archive support ────────────────────────────────────────────
+
+/**
+ * After extraction, step inside a single same-name wrapper folder if present
+ * (e.g. Archive.zip → Archive\ → actual content).
+ * buildGroups handles this too, but we need it earlier for the complex-structure check.
+ */
+function getEffectiveContentDir(extractedDir, archiveBaseName) {
+  let entries;
+  try { entries = fs.readdirSync(extractedDir, { withFileTypes: true }); } catch { return extractedDir; }
+  const subdirs = entries.filter((e) => e.isDirectory());
+  const files   = entries.filter((e) => e.isFile());
+  if (subdirs.length === 1 && files.length === 0) {
+    const subNorm  = subdirs[0].name.toLowerCase().replace(/[_\s-]/g, '');
+    const archNorm = archiveBaseName.toLowerCase().replace(/[_\s-]/g, '');
+    if (subNorm === archNorm) return path.join(extractedDir, subdirs[0].name);
+  }
+  return extractedDir;
+}
+
+/**
+ * Returns true when the extracted content needs hierarchical processing:
+ *   - archive files exist at the top level, OR
+ *   - any immediate subdir itself has subdirs or archives.
+ *
+ * Simple structures (flat images, or top-level subdirs with images only) return
+ * false and are handled by buildGroups as before (no output wrapper folder).
+ */
+function isComplexStructure(dir) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return false; }
+
+  if (entries.some((e) => e.isFile() && ARCHIVE_EXTS.has(path.extname(e.name).toLowerCase()))) return true;
+
+  for (const e of entries.filter((e) => e.isDirectory())) {
+    let sub;
+    try { sub = fs.readdirSync(path.join(dir, e.name), { withFileTypes: true }); } catch { continue; }
+    if (sub.some((se) => se.isDirectory())) return true;
+    if (sub.some((se) => se.isFile() && ARCHIVE_EXTS.has(path.extname(se.name).toLowerCase()))) return true;
+  }
+  return false;
+}
+
+/**
+ * Recursively process srcDir contents into outDir:
+ *   Archive files  → copy (CBZ) or convert (other) into outDir
+ *   Leaf image dir → pack all images to outDir/<folderName>.cbz
+ *   Non-leaf dir   → mkdir outDir/<name>, recurse
+ *   Loose images   → pack to outDir/<path.basename(outDir)>.cbz
+ */
+async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
+  let entries;
+  try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return []; }
+
+  const subdirs  = entries.filter((e) => e.isDirectory()).sort((a, b) => naturalSort(a.name, b.name));
+  const images   = entries
+    .filter((e) => e.isFile() && IMAGE_EXTS.has(path.extname(e.name).toLowerCase()))
+    .map((e) => path.join(srcDir, e.name))
+    .sort((a, b) => naturalSort(path.basename(a), path.basename(b)));
+  const archives = entries
+    .filter((e) => e.isFile() && ARCHIVE_EXTS.has(path.extname(e.name).toLowerCase()))
+    .map((e) => path.join(srcDir, e.name))
+    .sort((a, b) => naturalSort(path.basename(a), path.basename(b)));
+
+  const outputs = [];
+
+  // ── Archive files at this level ─────────────────────────────────────────
+  for (const archive of archives) {
+    if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+    const ext  = path.extname(archive).toLowerCase();
+    const base = path.basename(archive);
+    if (ext === '.cbz') {
+      const dst = path.join(outDir, base);
+      if (fs.existsSync(dst)) {
+        log(`  SKIP (exists): ${base}`, 'skip');
+      } else {
+        fs.copyFileSync(archive, dst);
+        log(`  Copied: ${base}`, 'success');
+        outputs.push(dst);
+      }
+    } else {
+      log(`  Converting: ${base}`, 'info');
+      const result = await processFile(archive, isManga, log, signal, outDir);
+      if (result.success && result.outputs) outputs.push(...result.outputs);
+    }
+  }
+
+  // ── Subdirectories ──────────────────────────────────────────────────────
+  for (const sub of subdirs) {
+    if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+    const subSrc = path.join(srcDir, sub.name);
+
+    let subEntries;
+    try { subEntries = fs.readdirSync(subSrc, { withFileTypes: true }); } catch { continue; }
+
+    const subImages      = subEntries
+      .filter((e) => e.isFile() && IMAGE_EXTS.has(path.extname(e.name).toLowerCase()))
+      .map((e) => path.join(subSrc, e.name))
+      .sort((a, b) => naturalSort(path.basename(a), path.basename(b)));
+    const subHasSubdirs  = subEntries.some((e) => e.isDirectory());
+    const subHasArchives = subEntries.some((e) => e.isFile() && ARCHIVE_EXTS.has(path.extname(e.name).toLowerCase()));
+
+    if (!subHasSubdirs && !subHasArchives && subImages.length > 0) {
+      // Leaf image folder → pack to CBZ at this output level
+      const cbzPath = path.join(outDir, `${sub.name}.cbz`);
+      if (fs.existsSync(cbzPath)) {
+        log(`  SKIP (exists): ${sub.name}.cbz`, 'skip');
+      } else {
+        log(`  Packing → ${sub.name}.cbz  (${subImages.length} images)`, 'info');
+        packToCbz(subImages, cbzPath);
+        const v = validateCbz(cbzPath, subImages.length);
+        if (v.valid) {
+          log(`  ✓ Valid: ${sub.name}.cbz`, 'success');
+          outputs.push(cbzPath);
+        } else {
+          log(`  ERROR: ${v.reason}`, 'error');
+          try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
+        }
+      }
+    } else {
+      // Intermediate folder — create matching output subdir and recurse
+      const subOut = path.join(outDir, sub.name);
+      fs.mkdirSync(subOut, { recursive: true });
+      const subOutputs = await processDirectoryTree(subSrc, subOut, isManga, log, signal);
+      outputs.push(...subOutputs);
+    }
+  }
+
+  // ── Loose images alongside subdirs or archives ──────────────────────────
+  if (images.length > 0) {
+    const looseName = path.basename(outDir);
+    const cbzPath   = path.join(outDir, `${looseName}.cbz`);
+    if (fs.existsSync(cbzPath)) {
+      log(`  SKIP (exists): ${looseName}.cbz`, 'skip');
+    } else {
+      log(`  Packing loose images → ${looseName}.cbz  (${images.length} images)`, 'info');
+      packToCbz(images, cbzPath);
+      const v = validateCbz(cbzPath, images.length);
+      if (v.valid) {
+        log(`  ✓ Valid: ${looseName}.cbz`, 'success');
+        outputs.push(cbzPath);
+      } else {
+        log(`  ERROR: ${v.reason}`, 'error');
+        try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
+      }
+    }
+  }
+
+  return outputs;
 }
 
 // ─── Packing ────────────────────────────────────────────────────────────────
@@ -458,100 +543,26 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
 
     if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
 
-    // 2. Detect nested archives (e.g. a .zip that bundles multiple .cbz/.cbr files)
-    const nestedArchives = findNestedArchives(tmpDir);
-    if (nestedArchives.length > 0) {
-      log(`  Found ${nestedArchives.length} nested archive(s) — processing each…`, 'info');
-      const outputs = [];
+    // 2. Determine structure type and route accordingly.
+    //    Complex (archives at any level, or subdirs containing further subdirs):
+    //      → create a named output folder and recurse with processDirectoryTree.
+    //    Simple (flat images, single-name wrapper, or top-level image-only subdirs):
+    //      → buildGroups handles it exactly as before (no output wrapper folder).
+    const contentDir = getEffectiveContentDir(tmpDir, baseName);
 
-      for (const nested of nestedArchives) {
-        if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
-
-        const nExt  = path.extname(nested).toLowerCase();
-        const nBase = path.basename(nested);
-
-        if (nExt === '.cbz') {
-          // Already .cbz → copy straight to output directory
-          const dst = path.join(outDir, nBase);
-          if (fs.existsSync(dst)) {
-            log(`  SKIP (exists): ${nBase}`, 'skip');
-          } else {
-            fs.copyFileSync(nested, dst);
-            log(`  Extracted .cbz: ${nBase}`, 'success');
-            outputs.push(dst);
-          }
-        } else {
-          // Other archive format → convert recursively
-          log(`  Converting nested: ${nBase}`, 'info');
-          const result = await processFile(nested, isManga, log, signal, outDir);
-          if (result.success && result.outputs) outputs.push(...result.outputs);
-        }
+    if (isComplexStructure(contentDir)) {
+      const wrapperOutDir = path.join(outDir, baseName);
+      fs.mkdirSync(wrapperOutDir, { recursive: true });
+      log(`  Hierarchical structure — processing into ${baseName}/`, 'info');
+      const outputs = await processDirectoryTree(contentDir, wrapperOutDir, isManga, log, signal);
+      if (outputs.length === 0) {
+        log('  WARNING: No output produced from hierarchical archive', 'warn');
+        return { success: false };
       }
-
-      // Also pack any loose images sitting alongside the nested archives
-      const loose = shallowImages(tmpDir);
-      if (loose.length > 0) {
-        const outputName = buildOutputName(baseName, path.basename(srcDir), isManga, false);
-        const outputPath = path.join(outDir, outputName + '.cbz');
-        if (!fs.existsSync(outputPath)) {
-          log(`  Packing ${loose.length} loose image(s) → ${outputName}.cbz`, 'info');
-          packToCbz(loose, outputPath);
-          const v = validateCbz(outputPath, loose.length);
-          if (v.valid) {
-            log(`  ✓ Valid: ${outputName}.cbz`, 'success');
-            outputs.push(outputPath);
-          } else {
-            log(`  ERROR: ${v.reason}`, 'error');
-            try { fs.unlinkSync(outputPath); } catch { /* ignore */ }
-          }
-        }
-      }
-
-      return { success: outputs.length > 0, outputs };
+      return { success: true, outputs };
     }
 
-    // 2b. Collection-of-collections: multiple subdirs each containing archives
-    //     (e.g. Lobo 00-64.zip → Lobo 000-010\ + Lobo 011-020\ + … each full of CBRs)
-    //     Create a matching output subfolder per subdir and convert archives into it.
-    const subdirCollections = findSubdirCollections(tmpDir);
-    if (subdirCollections.length > 0) {
-      log(`  Found ${subdirCollections.length} subdir collection(s) — processing each into its own folder…`, 'info');
-      const outputs = [];
-
-      for (const coll of subdirCollections) {
-        if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
-
-        const collOutDir = path.join(outDir, coll.name);
-        fs.mkdirSync(collOutDir, { recursive: true });
-        log(`  Collection: ${coll.name}  (${coll.archives.length} file(s))`, 'info');
-
-        for (const archive of coll.archives) {
-          if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
-
-          const aExt  = path.extname(archive).toLowerCase();
-          const aBase = path.basename(archive);
-
-          if (aExt === '.cbz') {
-            const dst = path.join(collOutDir, aBase);
-            if (fs.existsSync(dst)) {
-              log(`    SKIP (exists): ${aBase}`, 'skip');
-            } else {
-              fs.copyFileSync(archive, dst);
-              log(`    Copied .cbz: ${aBase}`, 'success');
-              outputs.push(dst);
-            }
-          } else {
-            log(`    Converting: ${aBase}`, 'info');
-            const result = await processFile(archive, isManga, log, signal, collOutDir);
-            if (result.success && result.outputs) outputs.push(...result.outputs);
-          }
-        }
-      }
-
-      return { success: outputs.length > 0, outputs };
-    }
-
-    // 3. No nested archives → image / folder structure logic
+    // 3. Simple structure → image / folder packing
     const archiveParentDir = path.basename(srcDir);
     const groups = buildGroups(tmpDir, baseName, archiveParentDir);
 
