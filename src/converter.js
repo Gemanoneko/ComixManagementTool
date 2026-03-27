@@ -594,6 +594,15 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
       try {
         // Fast metadata-only query — no rendering
         const totalPages = await getPdfPageCount(srcFile, signal);
+
+        // As soon as we know the page count, show it so the user isn't staring
+        // at a bare elapsed timer while GhostScript renders the first chunk.
+        if (totalPages) {
+          clearInterval(elapsedTick);
+          elapsedTick = null;
+          log(`  Converting PDF pages to JPEG at ${PDF_DPI} DPI… (0 / ${totalPages} pages — initializing…)`, 'info', true);
+        }
+
         let firstPageSeen = false;
 
         const onPageProgress = (done) => {
