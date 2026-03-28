@@ -12,9 +12,11 @@ function cleanupOrphanedTempDirs() {
   const tmpBase = os.tmpdir();
   try {
     for (const entry of fs.readdirSync(tmpBase, { withFileTypes: true })) {
-      const isCbz    = entry.isDirectory() && entry.name.startsWith('cbz_');
-      const isMagick = entry.isFile()      && entry.name.startsWith('magick-');
-      if (!isCbz && !isMagick) continue;
+      const isCbzDir    = entry.isDirectory() && entry.name.startsWith('cbz_');
+      // cbz_resized_*.cbz — orphaned temp CBZ files from crashed resize sessions
+      const isCbzFile   = entry.isFile()      && entry.name.startsWith('cbz_resized_');
+      const isMagick    = entry.isFile()      && entry.name.startsWith('magick-');
+      if (!isCbzDir && !isCbzFile && !isMagick) continue;
       try { fs.rmSync(path.join(tmpBase, entry.name), { recursive: true, force: true }); }
       catch { /* ignore locked entries */ }
     }
@@ -178,8 +180,8 @@ ipcMain.handle('sort:start', async (event, { sourceFolder, targetFolder }) => {
       pendingSortChoiceResolve = resolve;
       if (!mainWindow.isDestroyed()) {
         mainWindow.webContents.send('sort:ambiguous', {
-          file:    require('path').basename(filePath),
-          matches: matches.map((m) => ({ label: require('path').basename(m), fullPath: m })),
+          file:    path.basename(filePath),
+          matches: matches.map((m) => ({ label: path.basename(m), fullPath: m })),
         });
       }
     });
@@ -220,6 +222,81 @@ ipcMain.handle('shell:openFolder', (event, filePath) => {
   shell.showItemInFolder(filePath);
 });
 
+// ── Resize CBZs ───────────────────────────────────────────────────────────────
+let resizeAbortController = null;
+
+ipcMain.handle('resize:start', async (event, { folder }) => {
+  resizeAbortController = new AbortController();
+
+  const sendLog = (msg, type = 'info') => {
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('resize:log', { msg, type });
+    }
+  };
+
+  const sendProgress = (current, total) => {
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('resize:progress', { current, total });
+    }
+  };
+
+  try {
+    const { startResize } = require('./src/resizer');
+    const result = await startResize(
+      { folder },
+      sendLog,
+      sendProgress,
+      resizeAbortController.signal
+    );
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('resize:complete', result);
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      sendLog(`Fatal error: ${err.message}`, 'error');
+    }
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('resize:complete', { resized: [], skipped: 0, errors: [], aborted: true });
+    }
+  } finally {
+    resizeAbortController = null;
+  }
+});
+
+ipcMain.handle('resize:cancel', () => {
+  if (resizeAbortController) {
+    resizeAbortController.abort();
+  }
+});
+
+// Replace each original CBZ with its resized temp copy
+ipcMain.handle('resize:confirm', async (event, items) => {
+  const results = [];
+  for (const { original, tmp } of items) {
+    try {
+      fs.renameSync(tmp, original);
+      results.push({ file: original, success: true });
+    } catch (err) {
+      // renameSync can fail across drives — fall back to copy + delete
+      try {
+        fs.copyFileSync(tmp, original);
+        fs.unlinkSync(tmp);
+        results.push({ file: original, success: true });
+      } catch (err2) {
+        results.push({ file: original, success: false, error: err2.message });
+      }
+    }
+  }
+  return results;
+});
+
+// Discard pending resize temp files without applying changes
+ipcMain.handle('resize:discard', (event, items) => {
+  for (const { tmp } of items) {
+    try { fs.unlinkSync(tmp); } catch {}
+  }
+});
+
 // Convert a single file (used by the needs-review modal)
 ipcMain.handle('conversion:convertSingle', async (event, { filePath, isManga }) => {
   const sendLog = (msg, type = 'info', update = false) => {
@@ -240,11 +317,13 @@ ipcMain.handle('conversion:convertSingle', async (event, { filePath, isManga }) 
 ipcMain.handle('conversion:deleteOriginals', async (event, files) => {
   const results = [];
   for (const filePath of files) {
+    let sizeBytes = 0;
+    try { sizeBytes = fs.statSync(filePath).size; } catch {}
     try {
       fs.unlinkSync(filePath);
-      results.push({ file: filePath, success: true });
+      results.push({ file: filePath, success: true, sizeBytes });
     } catch (err) {
-      results.push({ file: filePath, success: false, error: err.message });
+      results.push({ file: filePath, success: false, error: err.message, sizeBytes: 0 });
     }
   }
   return results;

@@ -20,78 +20,152 @@
     <!-- Main content -->
     <div class="main-content">
 
-      <!-- Folder panel -->
-      <section class="panel folder-panel">
-        <div class="panel-title">Source Folder</div>
-
-        <div class="preset-row">
-          <span class="preset-label">Presets:</span>
-          <button class="preset-btn" data-path="Y:\Comix">Comix</button>
-          <button class="preset-btn" data-path="Y:\Ecchi">Ecchi</button>
-          <button class="preset-btn" data-path="Y:\Ecchi Pictures">Ecchi Pictures</button>
-          <button class="preset-btn" data-path="Y:\Magazines">Magazines</button>
-          <button class="preset-btn" data-path="Y:\Manga">Manga</button>
-          <button class="preset-btn" data-path="Y:\Sexy Comics">Sexy Comics</button>
-          <button class="preset-btn" data-path="Y:\Books\Artbooks">Artbooks</button>
-        </div>
-
-        <div class="folder-row">
-          <input id="folderPath" type="text" class="folder-input"
-                 placeholder="Select a folder or drag and drop one here…" readonly />
-          <button id="browseBtn" class="btn btn-secondary">Browse…</button>
-        </div>
-
-        <div class="options-row">
-          <label class="toggle-wrap">
-            <input id="mangaMode" type="checkbox" />
-            <span class="toggle-track"></span>
-            <span class="toggle-text">Manga Mode</span>
-          </label>
-          <span class="mode-hint" id="modeHint">Comics naming</span>
-        </div>
-
-        <div class="panel-divider"></div>
-
-        <div class="sort-target-header">
-          <span class="panel-title-small">Sort Comics</span>
-        </div>
-        <div class="sort-row-label">Source (unsorted):</div>
-        <div class="folder-row">
-          <input id="sortSourcePath" type="text" class="folder-input"
-                 placeholder="Select source folder (unsorted comix)…" readonly />
-          <button id="browseSortSourceBtn" class="btn btn-secondary">Browse…</button>
-        </div>
-        <div class="sort-row-label">Target (sorted collection):</div>
-        <div class="folder-row">
-          <input id="sortTargetPath" type="text" class="folder-input"
-                 placeholder="Select target folder (e.g. Y:\Comix)…" readonly />
-          <button id="browseSortTargetBtn" class="btn btn-secondary">Browse…</button>
-        </div>
-      </section>
-
-      <!-- Action bar -->
-      <div class="action-bar">
-        <button id="startBtn" class="btn btn-primary" disabled>▶  Start Conversion</button>
-        <button id="pauseBtn" class="btn btn-secondary" disabled>⏸  Pause</button>
-        <button id="cancelBtn" class="btn btn-danger" disabled>✕  Cancel</button>
-        <button id="sortBtn" class="btn btn-sort" disabled>⇄  Sort Comics</button>
-        <div id="progressWrap" class="progress-wrap hidden">
-          <div class="progress-track">
-            <div id="progressFill" class="progress-fill"></div>
-          </div>
-          <span id="progressLabel" class="progress-label">0 / 0</span>
-          <span id="etaLabel" class="eta-label"></span>
-        </div>
+      <!-- Tab bar -->
+      <div class="tab-bar" id="tabBar">
+        <button class="tab-btn active" data-tab="convert"
+                title="Convert comic archives (.cbr, .rar, .zip, .pdf) to .cbz format">Convert</button>
+        <button class="tab-btn" data-tab="resize"
+                title="Shrink oversized pages in existing .cbz files (pages larger than 4 500 px on the longest side)">Resize CBZs</button>
+        <button class="tab-btn" data-tab="sort"
+                title="Move unsorted comic files into the correct subfolder of your organized collection">Sort Comics</button>
       </div>
 
-      <!-- Log panel -->
+      <!-- ── Tab: Convert ──────────────────────────────────────────────────── -->
+      <div class="tab-pane" id="tab-convert">
+
+        <section class="panel folder-panel">
+          <div class="panel-title">Source Folder</div>
+
+          <div class="preset-row">
+            <span class="preset-label">Presets:</span>
+            <button class="preset-btn" data-path="Y:\Comix"
+                    title="Jump to Y:\Comix">Comix</button>
+            <button class="preset-btn" data-path="Y:\Ecchi"
+                    title="Jump to Y:\Ecchi">Ecchi</button>
+            <button class="preset-btn" data-path="Y:\Ecchi Pictures"
+                    title="Jump to Y:\Ecchi Pictures">Ecchi Pictures</button>
+            <button class="preset-btn" data-path="Y:\Magazines"
+                    title="Jump to Y:\Magazines">Magazines</button>
+            <button class="preset-btn" data-path="Y:\Manga"
+                    title="Jump to Y:\Manga">Manga</button>
+            <button class="preset-btn" data-path="Y:\Sexy Comics"
+                    title="Jump to Y:\Sexy Comics">Sexy Comics</button>
+            <button class="preset-btn" data-path="Y:\Books\Artbooks"
+                    title="Jump to Y:\Books\Artbooks">Artbooks</button>
+          </div>
+
+          <div class="folder-row">
+            <input id="folderPath" type="text" class="folder-input"
+                   placeholder="Select a folder or drag and drop one here…" readonly
+                   title="The folder to scan for comic archives" />
+            <button id="browseBtn" class="btn btn-secondary"
+                    title="Open a folder picker to choose the source folder">Browse…</button>
+          </div>
+
+          <div class="options-row">
+            <label class="toggle-wrap"
+                   title="Comics naming: Series Name - Volume X - #Issue&#10;Manga naming: Series Title - Vol XX - Ch YYY">
+              <input id="mangaMode" type="checkbox" />
+              <span class="toggle-track"></span>
+              <span class="toggle-text">Manga Mode</span>
+            </label>
+            <span class="mode-hint" id="modeHint">Comics naming</span>
+          </div>
+        </section>
+
+        <div class="action-bar">
+          <button id="startBtn" class="btn btn-primary" disabled
+                  title="Start converting all archives in the selected folder to .cbz">▶  Start Conversion</button>
+          <button id="pauseBtn" class="btn btn-secondary" disabled
+                  title="Pause conversion after the current file finishes; click again to resume">⏸  Pause</button>
+          <button id="cancelBtn" class="btn btn-danger" disabled
+                  title="Abort the conversion immediately">✕  Cancel</button>
+          <div id="progressWrap" class="progress-wrap hidden">
+            <div class="progress-track">
+              <div id="progressFill" class="progress-fill"></div>
+            </div>
+            <span id="progressLabel" class="progress-label">0 / 0</span>
+            <span id="etaLabel" class="eta-label"></span>
+          </div>
+        </div>
+
+      </div><!-- /tab-convert -->
+
+      <!-- ── Tab: Resize CBZs ──────────────────────────────────────────────── -->
+      <div class="tab-pane hidden" id="tab-resize">
+
+        <section class="panel">
+          <div class="panel-title">CBZ Folder</div>
+          <div class="folder-row">
+            <input id="resizeFolderPath" type="text" class="folder-input"
+                   placeholder="Select folder containing CBZ files…" readonly
+                   title="Root folder to scan for .cbz files (all subfolders are included)" />
+            <button id="browseResizeBtn" class="btn btn-secondary"
+                    title="Open a folder picker to choose the CBZ folder">Browse…</button>
+          </div>
+          <p class="panel-hint">
+            Scans subfolders recursively. Pages whose longest side exceeds 4 500 px are
+            shrunk to fit within 4 500 × 4 500 at JPEG quality 90. Pages already within
+            the limit are untouched. Changes are previewed before they are applied.
+          </p>
+        </section>
+
+        <div class="action-bar">
+          <button id="startResizeBtn" class="btn btn-resize" disabled
+                  title="Scan CBZ files and resize pages larger than 4 500 px (longest side) to fit within 4 500 × 4 500 at quality 90">⬡  Resize CBZs</button>
+          <button id="cancelResizeBtn" class="btn btn-danger" disabled
+                  title="Abort the resize operation">✕  Cancel</button>
+          <div id="resizeProgressWrap" class="progress-wrap hidden">
+            <div class="progress-track">
+              <div id="resizeProgressFill" class="progress-fill"></div>
+            </div>
+            <span id="resizeProgressLabel" class="progress-label">0 / 0</span>
+          </div>
+        </div>
+
+      </div><!-- /tab-resize -->
+
+      <!-- ── Tab: Sort Comics ──────────────────────────────────────────────── -->
+      <div class="tab-pane hidden" id="tab-sort">
+
+        <section class="panel">
+          <div class="panel-title">Sort Comics</div>
+
+          <div class="sort-row-label">Source (unsorted):</div>
+          <div class="folder-row">
+            <input id="sortSourcePath" type="text" class="folder-input"
+                   placeholder="Select source folder (unsorted comix)…" readonly
+                   title="The folder containing unsorted comic files to be moved" />
+            <button id="browseSortSourceBtn" class="btn btn-secondary"
+                    title="Browse for the folder containing unsorted comic files">Browse…</button>
+          </div>
+
+          <div class="sort-row-label">Target (sorted collection):</div>
+          <div class="folder-row">
+            <input id="sortTargetPath" type="text" class="folder-input"
+                   placeholder="Select target folder (e.g. Y:\Comix)…" readonly
+                   title="The root of your organized collection — files will be moved into matching subfolders here" />
+            <button id="browseSortTargetBtn" class="btn btn-secondary"
+                    title="Browse for the root of your sorted collection">Browse…</button>
+          </div>
+        </section>
+
+        <div class="action-bar">
+          <button id="sortBtn" class="btn btn-sort" disabled
+                  title="Move unsorted files from the source folder into the correct subfolder of the target collection">⇄  Sort Comics</button>
+        </div>
+
+      </div><!-- /tab-sort -->
+
+      <!-- Shared log panel -->
       <section class="panel log-panel">
         <div class="log-toolbar">
           <span class="panel-title">Log</span>
-          <button id="clearLogBtn" class="btn btn-ghost">Clear</button>
+          <button id="clearLogBtn" class="btn btn-ghost"
+                  title="Clear all log output">Clear</button>
         </div>
         <div id="logContainer" class="log-container">
-          <span class="log-placeholder">Conversion output will appear here…</span>
+          <span class="log-placeholder">Output will appear here…</span>
         </div>
       </section>
 
@@ -106,7 +180,8 @@
       <p id="sortModalFile" class="sort-modal-file"></p>
       <div id="sortModalOptions" class="sort-modal-options"></div>
       <div class="modal-actions">
-        <button id="sortModalSkipBtn" class="btn btn-secondary">Skip this file</button>
+        <button id="sortModalSkipBtn" class="btn btn-secondary"
+                title="Skip this file — leave it unsorted">Skip this file</button>
       </div>
     </div>
   </div>
@@ -121,8 +196,29 @@
       </p>
       <div id="deleteList" class="delete-list"></div>
       <div class="modal-actions">
-        <button id="skipDeleteBtn"    class="btn btn-secondary">Keep All</button>
-        <button id="confirmDeleteBtn" class="btn btn-danger">Delete All</button>
+        <button id="skipDeleteBtn"    class="btn btn-secondary"
+                title="Keep all original files — nothing will be deleted">Keep All</button>
+        <button id="confirmDeleteBtn" class="btn btn-danger"
+                title="Permanently delete all listed original files">Delete All</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Resize-confirmation modal -->
+  <div id="resizeModal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h2 class="modal-title">Replace Resized CBZ Files?</h2>
+      <p class="modal-desc">
+        The following CBZ files have been resized and validated.
+        Click <strong>Replace All</strong> to overwrite the originals, or
+        <strong>Discard</strong> to keep the originals unchanged.
+      </p>
+      <div id="resizeList" class="delete-list"></div>
+      <div class="modal-actions">
+        <button id="discardResizeBtn" class="btn btn-secondary"
+                title="Discard the resized copies — originals remain unchanged">Discard</button>
+        <button id="confirmResizeBtn" class="btn btn-primary"
+                title="Replace each original CBZ with its resized version">Replace All</button>
       </div>
     </div>
   </div>
@@ -153,12 +249,18 @@
       <p id="reviewStatus" class="review-status hidden"></p>
 
       <div class="modal-actions">
-        <button id="reviewKeepAllBtn"    class="btn btn-secondary">Keep All Remaining</button>
-        <button id="reviewDeleteAllBtn"  class="btn btn-danger">Delete All Remaining</button>
-        <button id="reviewOpenFolderBtn" class="btn btn-secondary">Open Folder</button>
-        <button id="reviewConvertBtn"    class="btn btn-convert">Convert</button>
-        <button id="reviewKeepBtn"       class="btn btn-secondary">Keep</button>
-        <button id="reviewDeleteBtn"     class="btn btn-danger">Delete</button>
+        <button id="reviewKeepAllBtn"    class="btn btn-secondary"
+                title="Keep all remaining review files — none will be deleted">Keep All Remaining</button>
+        <button id="reviewDeleteAllBtn"  class="btn btn-danger"
+                title="Delete all remaining review files permanently">Delete All Remaining</button>
+        <button id="reviewOpenFolderBtn" class="btn btn-secondary"
+                title="Open this file's containing folder in Explorer">Open Folder</button>
+        <button id="reviewConvertBtn"    class="btn btn-convert"
+                title="Convert this file to .cbz now, then delete the original">Convert</button>
+        <button id="reviewKeepBtn"       class="btn btn-secondary"
+                title="Keep this file and move to the next one">Keep</button>
+        <button id="reviewDeleteBtn"     class="btn btn-danger"
+                title="Delete this original file permanently">Delete</button>
       </div>
     </div>
   </div>

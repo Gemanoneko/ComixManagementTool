@@ -14,26 +14,86 @@ let pendingOriginals = [];
 let pendingReview    = [];
 let reviewIndex      = 0;
 
+let lastCbzBytes     = 0;    // total size of CBZ files created in the last conversion session
+
+let resizeFolder     = null;
+let isResizing       = false;
+let pendingResized   = [];   // [{ original, tmp, pagesResized, totalPages }]
+
+let sortSourceFolder = null;
+let sortTargetFolder = null;
+let isSorting        = false;
+
 // ── DOM refs ─────────────────────────────────────────────────────────────────
-const folderPathEl    = document.getElementById('folderPath');
-const browseBtn       = document.getElementById('browseBtn');
-const startBtn        = document.getElementById('startBtn');
-const pauseBtn        = document.getElementById('pauseBtn');
-const cancelBtn       = document.getElementById('cancelBtn');
-const mangaModeEl     = document.getElementById('mangaMode');
-const modeHint        = document.getElementById('modeHint');
+// Tabs
+const tabBtns  = document.querySelectorAll('.tab-btn');
+const tabPanes = document.querySelectorAll('.tab-pane');
+
+// Convert tab
+const folderPathEl     = document.getElementById('folderPath');
+const browseBtn        = document.getElementById('browseBtn');
+const startBtn         = document.getElementById('startBtn');
+const pauseBtn         = document.getElementById('pauseBtn');
+const cancelBtn        = document.getElementById('cancelBtn');
+const mangaModeEl      = document.getElementById('mangaMode');
+const modeHint         = document.getElementById('modeHint');
+const progressWrap     = document.getElementById('progressWrap');
+const progressFill     = document.getElementById('progressFill');
+const progressLabel    = document.getElementById('progressLabel');
+const etaLabel         = document.getElementById('etaLabel');
+
+// Resize tab
+const resizeFolderPathEl  = document.getElementById('resizeFolderPath');
+const browseResizeBtn     = document.getElementById('browseResizeBtn');
+const startResizeBtn      = document.getElementById('startResizeBtn');
+const cancelResizeBtn     = document.getElementById('cancelResizeBtn');
+const resizeProgressWrap  = document.getElementById('resizeProgressWrap');
+const resizeProgressFill  = document.getElementById('resizeProgressFill');
+const resizeProgressLabel = document.getElementById('resizeProgressLabel');
+
+// Sort tab
+const sortSourcePathEl    = document.getElementById('sortSourcePath');
+const browseSortSourceBtn = document.getElementById('browseSortSourceBtn');
+const sortTargetPathEl    = document.getElementById('sortTargetPath');
+const browseSortTargetBtn = document.getElementById('browseSortTargetBtn');
+const sortBtn             = document.getElementById('sortBtn');
+
+// Shared
 const logContainer    = document.getElementById('logContainer');
 const clearLogBtn     = document.getElementById('clearLogBtn');
-const progressWrap    = document.getElementById('progressWrap');
-const progressFill    = document.getElementById('progressFill');
-const progressLabel   = document.getElementById('progressLabel');
-const etaLabel        = document.getElementById('etaLabel');
-const deleteModal     = document.getElementById('deleteModal');
-const deleteList      = document.getElementById('deleteList');
-const confirmDeleteBtn = document.getElementById('confirmDeleteBtn');
-const skipDeleteBtn   = document.getElementById('skipDeleteBtn');
 
-// ── Folder selection ─────────────────────────────────────────────────────────
+// Modals
+const deleteModal      = document.getElementById('deleteModal');
+const deleteList       = document.getElementById('deleteList');
+const confirmDeleteBtn = document.getElementById('confirmDeleteBtn');
+const skipDeleteBtn    = document.getElementById('skipDeleteBtn');
+
+const resizeModal      = document.getElementById('resizeModal');
+const resizeList       = document.getElementById('resizeList');
+const confirmResizeBtn = document.getElementById('confirmResizeBtn');
+const discardResizeBtn = document.getElementById('discardResizeBtn');
+
+const sortModal        = document.getElementById('sortModal');
+const sortModalFile    = document.getElementById('sortModalFile');
+const sortModalOptions = document.getElementById('sortModalOptions');
+const sortModalSkipBtn = document.getElementById('sortModalSkipBtn');
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+tabBtns.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    if (isConverting || isResizing || isSorting) return;
+    tabBtns.forEach((b) => b.classList.remove('active'));
+    tabPanes.forEach((p) => p.classList.add('hidden'));
+    btn.classList.add('active');
+    document.getElementById(`tab-${btn.dataset.tab}`).classList.remove('hidden');
+  });
+});
+
+function setTabsDisabled(disabled) {
+  tabBtns.forEach((b) => (b.disabled = disabled));
+}
+
+// ── Convert tab: folder selection ─────────────────────────────────────────────
 document.querySelectorAll('.preset-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     setFolder(btn.dataset.path);
@@ -116,8 +176,8 @@ async function startConversion() {
   cancelBtn.disabled = false;
   browseBtn.disabled = true;
   document.querySelectorAll('.preset-btn').forEach((b) => (b.disabled = true));
+  setTabsDisabled(true);
 
-  // Reset log
   logContainer.innerHTML = '';
   progressWrap.classList.remove('hidden');
   setProgress(0, 0);
@@ -126,10 +186,10 @@ async function startConversion() {
     rootFolder: currentFolder,
     isManga: mangaModeEl.checked,
   });
-  // Result arrives via the 'conversion:complete' event
+  // Result arrives via 'conversion:complete'
 }
 
-function resetControls() {
+function resetConvertControls() {
   isConverting = false;
   isPaused = false;
   startBtn.disabled = !currentFolder;
@@ -138,14 +198,14 @@ function resetControls() {
   cancelBtn.disabled = true;
   browseBtn.disabled = false;
   document.querySelectorAll('.preset-btn').forEach((b) => (b.disabled = false));
+  setTabsDisabled(false);
 }
 
-// ── IPC event handlers ────────────────────────────────────────────────────────
+// ── IPC: Conversion ───────────────────────────────────────────────────────────
 electron.on('conversion:log', ({ msg, type }) => {
   appendLog(msg, type);
 });
 
-// Replace the last log line in place (used for PDF page-by-page progress)
 electron.on('conversion:logUpdate', ({ msg, type }) => {
   updateLastLog(msg, type);
 });
@@ -155,12 +215,17 @@ electron.on('conversion:progress', ({ current, total, etaMs }) => {
 });
 
 electron.on('conversion:complete', (result) => {
-  resetControls();
+  resetConvertControls();
 
   const converted    = result.converted   || [];
   const preExisting  = result.preExisting || [];
   const needsReview  = result.needsReview || [];
   const allDeletable = [...converted, ...preExisting];
+
+  lastCbzBytes = result.totalCbzBytes || 0;
+  if (lastCbzBytes > 0) {
+    appendLog(`New CBZ files created this session: ${formatBytes(lastCbzBytes)}`, 'info');
+  }
 
   pendingReview = needsReview;
   reviewIndex   = 0;
@@ -179,8 +244,6 @@ function appendLog(msg, type = 'info') {
   const placeholder = logContainer.querySelector('.log-placeholder');
   if (placeholder) placeholder.remove();
 
-  // A new section header (new file, scanning, etc.) retires the current
-  // progress slot so the next updateLastLog anchors to a fresh span.
   if (type === 'header') {
     logContainer.querySelectorAll('.log-progress-line')
       .forEach((s) => s.classList.remove('log-progress-line'));
@@ -193,9 +256,6 @@ function appendLog(msg, type = 'info') {
   logContainer.scrollTop = logContainer.scrollHeight;
 }
 
-/** Replace the progress span in place — used for live PDF progress updates.
- *  Tracks the span with class log-progress-line so that messages appended
- *  after it (e.g. retry warnings) do not steal the update target. */
 function updateLastLog(msg, type = 'info') {
   let target = logContainer.querySelector('span.log-progress-line');
   if (!target) {
@@ -209,10 +269,10 @@ function updateLastLog(msg, type = 'info') {
 }
 
 clearLogBtn.addEventListener('click', () => {
-  logContainer.innerHTML = '<span class="log-placeholder">Conversion output will appear here…</span>';
+  logContainer.innerHTML = '<span class="log-placeholder">Output will appear here…</span>';
 });
 
-// ── Progress bar ──────────────────────────────────────────────────────────────
+// ── Progress bar (Convert) ────────────────────────────────────────────────────
 function setProgress(current, total, etaMs = 0) {
   if (total === 0) {
     progressFill.style.width = '0%';
@@ -232,6 +292,26 @@ function formatEta(ms) {
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
   return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+function formatBytes(bytes) {
+  if (bytes <= 0)          return '0 B';
+  if (bytes < 1024)        return `${bytes} B`;
+  if (bytes < 1024 ** 2)   return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3)   return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+// ── Progress bar (Resize) ─────────────────────────────────────────────────────
+function setResizeProgress(current, total) {
+  if (total === 0) {
+    resizeProgressFill.style.width = '0%';
+    resizeProgressLabel.textContent = '';
+    return;
+  }
+  const pct = Math.round((current / total) * 100);
+  resizeProgressFill.style.width = `${pct}%`;
+  resizeProgressLabel.textContent = `${current} / ${total}`;
 }
 
 // ── Delete-originals modal ────────────────────────────────────────────────────
@@ -264,13 +344,18 @@ confirmDeleteBtn.addEventListener('click', async () => {
 
   const results = await electron.invoke('conversion:deleteOriginals', pendingOriginals);
   for (const r of results) {
-    if (r.success) {
-      appendLog(`  DELETED: ${r.file}`, 'success');
-    } else {
-      appendLog(`  FAILED:  ${r.file}  (${r.error})`, 'error');
-    }
+    if (r.success) appendLog(`  DELETED: ${r.file}`, 'success');
+    else           appendLog(`  FAILED:  ${r.file}  (${r.error})`, 'error');
   }
-  appendLog('Done.', 'success');
+  const freedBytes = results.reduce((sum, r) => sum + (r.success ? (r.sizeBytes || 0) : 0), 0);
+  const parts = [];
+  if (freedBytes > 0)   parts.push(`freed ${formatBytes(freedBytes)}`);
+  if (lastCbzBytes > 0) parts.push(`new CBZs: ${formatBytes(lastCbzBytes)}`);
+  if (freedBytes > 0 && lastCbzBytes > 0) {
+    const net = freedBytes - lastCbzBytes;
+    parts.push(net >= 0 ? `net gain ${formatBytes(net)}` : `net loss ${formatBytes(-net)}`);
+  }
+  appendLog(`Done${parts.length ? ' — ' + parts.join(', ') : ''}.`, 'success');
   pendingOriginals = [];
   if (pendingReview.length > 0) {
     appendLog('\nSome files need manual review:', 'warn');
@@ -280,12 +365,221 @@ confirmDeleteBtn.addEventListener('click', async () => {
 
 skipDeleteBtn.addEventListener('click', () => {
   deleteModal.classList.add('hidden');
-  appendLog('\nOriginals kept.', 'info');
+  const kept = `\nOriginals kept.${lastCbzBytes > 0 ? `  New CBZs: ${formatBytes(lastCbzBytes)}.` : ''}`;
+  appendLog(kept, 'info');
   pendingOriginals = [];
   if (pendingReview.length > 0) {
     appendLog('\nSome files need manual review:', 'warn');
     showNextReview();
   }
+});
+
+// ── Resize CBZs tab ───────────────────────────────────────────────────────────
+browseResizeBtn.addEventListener('click', async () => {
+  const folder = await electron.invoke('dialog:openFolder');
+  if (folder) {
+    resizeFolder = folder;
+    resizeFolderPathEl.value = folder;
+    startResizeBtn.disabled = false;
+  }
+});
+
+startResizeBtn.addEventListener('click', async () => {
+  if (!resizeFolder || isResizing) return;
+
+  isResizing = true;
+  startResizeBtn.disabled = true;
+  cancelResizeBtn.disabled = false;
+  browseResizeBtn.disabled = true;
+  setTabsDisabled(true);
+
+  logContainer.innerHTML = '';
+  resizeProgressWrap.classList.remove('hidden');
+  setResizeProgress(0, 0);
+
+  await electron.invoke('resize:start', { folder: resizeFolder });
+  // Result arrives via 'resize:complete'
+});
+
+cancelResizeBtn.addEventListener('click', () => {
+  electron.invoke('resize:cancel');
+});
+
+electron.on('resize:log', ({ msg, type }) => {
+  appendLog(msg, type);
+});
+
+electron.on('resize:progress', ({ current, total }) => {
+  setResizeProgress(current, total);
+});
+
+electron.on('resize:complete', (result) => {
+  isResizing = false;
+  startResizeBtn.disabled = !resizeFolder;
+  cancelResizeBtn.disabled = true;
+  browseResizeBtn.disabled = false;
+  setTabsDisabled(false);
+
+  pendingResized = result.resized || [];
+
+  if (result.aborted) {
+    appendLog('Resize cancelled.', 'warn');
+    return;
+  }
+
+  const skipped = result.skipped || 0;
+  const errors  = result.errors  || [];
+
+  if (pendingResized.length > 0) {
+    showResizeModal(pendingResized, skipped, errors);
+  } else {
+    const msg = `Done — ${skipped} file(s) already within 4 500 px, ${errors.length} error(s).`;
+    appendLog(msg, errors.length > 0 ? 'warn' : 'success');
+  }
+});
+
+function showResizeModal(resized, skipped, errors) {
+  resizeList.innerHTML = '';
+
+  const totalSaved = resized.reduce((sum, r) => sum + Math.max(0, r.originalSize - r.newSize), 0);
+  const hdr = document.createElement('div');
+  hdr.className = 'dl-section-header';
+  hdr.textContent = `Ready to replace (${resized.length}) — ${formatBytes(totalSaved)} total savings`;
+  resizeList.appendChild(hdr);
+
+  for (const item of resized) {
+    const saved = Math.max(0, item.originalSize - item.newSize);
+    const div = document.createElement('div');
+    div.className = 'dl-item dl-converted';
+    div.textContent =
+      `${item.original}  [${item.pagesResized}/${item.totalPages} pages — ${formatBytes(saved)} saved]`;
+    resizeList.appendChild(div);
+  }
+
+  if (errors.length > 0) {
+    const ehdr = document.createElement('div');
+    ehdr.className = 'dl-section-header';
+    ehdr.textContent = `Errors (${errors.length})`;
+    resizeList.appendChild(ehdr);
+    for (const e of errors) {
+      const div = document.createElement('div');
+      div.className = 'dl-item dl-preexisting';
+      div.textContent = `${e.file}  — ${e.reason}`;
+      resizeList.appendChild(div);
+    }
+  }
+
+  resizeModal.classList.remove('hidden');
+}
+
+confirmResizeBtn.addEventListener('click', async () => {
+  resizeModal.classList.add('hidden');
+  appendLog('\nApplying resized CBZ files…', 'header');
+
+  const totalSaved = pendingResized.reduce((sum, r) => sum + Math.max(0, r.originalSize - r.newSize), 0);
+  const results = await electron.invoke('resize:confirm', pendingResized);
+  let succeeded = 0;
+  for (const r of results) {
+    if (r.success) { appendLog(`  REPLACED: ${r.file}`, 'success'); succeeded++; }
+    else           appendLog(`  FAILED:   ${r.file}  (${r.error})`, 'error');
+  }
+  if (succeeded > 0) {
+    appendLog(`Done — ${succeeded} file(s) replaced, ${formatBytes(totalSaved)} freed.`, 'success');
+  } else {
+    appendLog('Done.', 'info');
+  }
+  pendingResized = [];
+});
+
+discardResizeBtn.addEventListener('click', async () => {
+  resizeModal.classList.add('hidden');
+  await electron.invoke('resize:discard', pendingResized);
+  appendLog('Resized copies discarded — originals unchanged.', 'info');
+  pendingResized = [];
+});
+
+// ── Sort Comics tab ───────────────────────────────────────────────────────────
+browseSortSourceBtn.addEventListener('click', async () => {
+  const folder = await electron.invoke('dialog:openFolder');
+  if (folder) {
+    sortSourceFolder = folder;
+    sortSourcePathEl.value = folder;
+    updateSortBtn();
+  }
+});
+
+browseSortTargetBtn.addEventListener('click', async () => {
+  const folder = await electron.invoke('dialog:openFolder');
+  if (folder) {
+    sortTargetFolder = folder;
+    sortTargetPathEl.value = folder;
+    updateSortBtn();
+  }
+});
+
+function updateSortBtn() {
+  sortBtn.disabled = isSorting || !sortSourceFolder || !sortTargetFolder;
+}
+
+sortBtn.addEventListener('click', async () => {
+  if (!sortSourceFolder || !sortTargetFolder || isSorting) return;
+
+  isSorting = true;
+  sortBtn.disabled = true;
+  browseSortSourceBtn.disabled = true;
+  browseSortTargetBtn.disabled = true;
+  setTabsDisabled(true);
+
+  logContainer.innerHTML = '';
+
+  await electron.invoke('sort:start', {
+    sourceFolder: sortSourceFolder,
+    targetFolder: sortTargetFolder,
+  });
+  // Result arrives via 'sort:complete'
+});
+
+electron.on('sort:log', ({ msg, type }) => {
+  appendLog(msg, type);
+});
+
+electron.on('sort:ambiguous', ({ file, matches }) => {
+  showSortModal(file, matches);
+});
+
+electron.on('sort:complete', ({ moved, skipped, manual }) => {
+  isSorting = false;
+  browseSortSourceBtn.disabled = false;
+  browseSortTargetBtn.disabled = false;
+  setTabsDisabled(false);
+  updateSortBtn();
+
+  appendLog('', 'info');
+  appendLog(`Sort complete — moved: ${moved}, skipped: ${skipped}, manual: ${manual}`, 'success');
+});
+
+function showSortModal(file, matches) {
+  sortModalFile.textContent = file;
+  sortModalOptions.innerHTML = '';
+
+  for (const m of matches) {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sort-option';
+    btn.textContent = m.label;
+    btn.title = m.fullPath;
+    btn.addEventListener('click', () => {
+      sortModal.classList.add('hidden');
+      electron.invoke('sort:choice', { choice: m.fullPath });
+    });
+    sortModalOptions.appendChild(btn);
+  }
+
+  sortModal.classList.remove('hidden');
+}
+
+sortModalSkipBtn.addEventListener('click', () => {
+  sortModal.classList.add('hidden');
+  electron.invoke('sort:choice', { choice: null });
 });
 
 // ── Needs-review modal ────────────────────────────────────────────────────────
@@ -356,11 +650,8 @@ reviewKeepBtn.addEventListener('click', () => {
 reviewDeleteBtn.addEventListener('click', async () => {
   const file = pendingReview[reviewIndex].file;
   const results = await electron.invoke('conversion:deleteOriginals', [file]);
-  if (results[0].success) {
-    appendLog(`  DELETED: ${file}`, 'success');
-  } else {
-    appendLog(`  FAILED:  ${file}  (${results[0].error})`, 'error');
-  }
+  if (results[0].success) appendLog(`  DELETED: ${file}`, 'success');
+  else                    appendLog(`  FAILED:  ${file}  (${results[0].error})`, 'error');
   reviewIndex++;
   showNextReview();
 });
@@ -378,20 +669,16 @@ reviewConvertBtn.addEventListener('click', async () => {
   });
 
   if (result && result.success) {
-    // Auto-delete the original and advance
     const del = await electron.invoke('conversion:deleteOriginals', [item.file]);
-    if (del[0].success) {
-      appendLog(`  DELETED original: ${item.file}`, 'success');
-    } else {
-      appendLog(`  FAILED to delete original: ${del[0].error}`, 'error');
-    }
+    if (del[0].success) appendLog(`  DELETED original: ${item.file}`, 'success');
+    else                appendLog(`  FAILED to delete original: ${del[0].error}`, 'error');
     reviewIndex++;
     showNextReview();
   } else {
     reviewStatus.textContent = 'Conversion failed — see log for details.';
     reviewStatus.className   = 'review-status review-status-error';
     setReviewBusy(false);
-    reviewConvertBtn.disabled = true; // don't retry; user can Keep or Delete
+    reviewConvertBtn.disabled = true;
   }
 });
 
@@ -413,106 +700,4 @@ reviewDeleteAllBtn.addEventListener('click', async () => {
   }
   appendLog('Done.', 'success');
   pendingReview = [];
-});
-
-// ── Sort Comics ───────────────────────────────────────────────────────────────
-let sortSourceFolder = null;
-let sortTargetFolder = null;
-let isSorting        = false;
-
-const sortSourcePathEl    = document.getElementById('sortSourcePath');
-const browseSortSourceBtn = document.getElementById('browseSortSourceBtn');
-const sortTargetPathEl    = document.getElementById('sortTargetPath');
-const browseSortTargetBtn = document.getElementById('browseSortTargetBtn');
-const sortBtn             = document.getElementById('sortBtn');
-const sortModal           = document.getElementById('sortModal');
-const sortModalFile       = document.getElementById('sortModalFile');
-const sortModalOptions    = document.getElementById('sortModalOptions');
-const sortModalSkipBtn    = document.getElementById('sortModalSkipBtn');
-
-browseSortSourceBtn.addEventListener('click', async () => {
-  const folder = await electron.invoke('dialog:openFolder');
-  if (folder) {
-    sortSourceFolder = folder;
-    sortSourcePathEl.value = folder;
-    updateSortBtn();
-  }
-});
-
-browseSortTargetBtn.addEventListener('click', async () => {
-  const folder = await electron.invoke('dialog:openFolder');
-  if (folder) {
-    sortTargetFolder = folder;
-    sortTargetPathEl.value = folder;
-    updateSortBtn();
-  }
-});
-
-function updateSortBtn() {
-  sortBtn.disabled = isSorting || !sortSourceFolder || !sortTargetFolder;
-}
-
-sortBtn.addEventListener('click', async () => {
-  if (!sortSourceFolder || !sortTargetFolder || isSorting) return;
-
-  isSorting = true;
-  sortBtn.disabled = true;
-  startBtn.disabled = true;
-  browseBtn.disabled = true;
-  browseSortSourceBtn.disabled = true;
-  browseSortTargetBtn.disabled = true;
-  document.querySelectorAll('.preset-btn').forEach((b) => (b.disabled = true));
-
-  logContainer.innerHTML = '';
-
-  await electron.invoke('sort:start', {
-    sourceFolder: sortSourceFolder,
-    targetFolder: sortTargetFolder,
-  });
-  // Result arrives via 'sort:complete'
-});
-
-electron.on('sort:log', ({ msg, type }) => {
-  appendLog(msg, type);
-});
-
-electron.on('sort:ambiguous', ({ file, matches }) => {
-  showSortModal(file, matches);
-});
-
-electron.on('sort:complete', ({ moved, skipped, manual }) => {
-  isSorting = false;
-  startBtn.disabled = !currentFolder;
-  browseBtn.disabled = false;
-  browseSortSourceBtn.disabled = false;
-  browseSortTargetBtn.disabled = false;
-  document.querySelectorAll('.preset-btn').forEach((b) => (b.disabled = false));
-  updateSortBtn();
-
-  appendLog('', 'info');
-  appendLog(`Sort complete — moved: ${moved}, skipped: ${skipped}, manual: ${manual}`, 'success');
-});
-
-function showSortModal(file, matches) {
-  sortModalFile.textContent = file;
-  sortModalOptions.innerHTML = '';
-
-  for (const m of matches) {
-    const btn = document.createElement('button');
-    btn.className = 'btn btn-sort-option';
-    btn.textContent = m.label;
-    btn.title = m.fullPath;
-    btn.addEventListener('click', () => {
-      sortModal.classList.add('hidden');
-      electron.invoke('sort:choice', { choice: m.fullPath });
-    });
-    sortModalOptions.appendChild(btn);
-  }
-
-  sortModal.classList.remove('hidden');
-}
-
-sortModalSkipBtn.addEventListener('click', () => {
-  sortModal.classList.add('hidden');
-  electron.invoke('sort:choice', { choice: null });
 });

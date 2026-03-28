@@ -211,7 +211,7 @@ async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress, 
   // -density must come before the input so GhostScript rasterises at the right DPI.
   // -colorspace / -background / -alpha are image operators and must come after the input.
   const preInput  = ['-density', String(PDF_DPI)];
-  const postInput = ['-colorspace', 'sRGB', '-background', 'white', '-alpha', 'remove', '-alpha', 'off'];
+  const postInput = ['-colorspace', 'sRGB', '-background', 'white', '-alpha', 'remove', '-alpha', 'off', '-resize', '4500x4500>'];
   const quality   = ['-quality', '90'];
 
   // Build one task array per worker
@@ -1207,6 +1207,7 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
   const converted     = []; // converted successfully in this run
   const fileDurations = [];
   const outcomes      = []; // per-file outcome for summary
+  let   totalCbzBytes = 0;  // total size of CBZ files created this session
 
   for (let i = 0; i < files.length; i++) {
     if (signal?.aborted) break;
@@ -1226,7 +1227,12 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
 
     try {
       const result = await processFile(file, isManga, log, signal);
-      if (result.success) converted.push(file);
+      if (result.success) {
+        converted.push(file);
+        for (const cbzPath of (result.outputs || [])) {
+          try { totalCbzBytes += fs.statSync(cbzPath).size; } catch {}
+        }
+      }
       outcomes.push({ file, result });
     } catch (err) {
       if (err.name === 'AbortError') break;
@@ -1265,7 +1271,7 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
     for (const item of needsReview) log(`  ? ${path.relative(rootFolder, item.file)}`, 'skip');
   }
 
-  return { converted, preExisting: uniquePreExisting, needsReview };
+  return { converted, preExisting: uniquePreExisting, needsReview, totalCbzBytes };
 }
 
 async function convertSingleFile(filePath, isManga, log, signal) {
