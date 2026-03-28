@@ -38,6 +38,13 @@ function getFirstLevelFolders(dir) {
     .map((e) => path.join(dir, e.name));
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function hasSubfolders(dir) {
+  try { return fs.readdirSync(dir, { withFileTypes: true }).some((e) => e.isDirectory()); }
+  catch { return false; }
+}
+
 // ─── Matching ────────────────────────────────────────────────────────────────
 
 /**
@@ -59,7 +66,7 @@ function findMatches(filePath, leafFolders) {
   const candidates = leafFolders
     .map((folder) => {
       const folderWords = normalise(path.basename(folder)).split(' ').filter(Boolean);
-      if (folderWords.length === 0) return null;
+      if (folderWords.length < 2) return null; // single-word folders are too ambiguous to auto-match
       const isPrefix = folderWords.every((word, i) => fileWords[i] === word);
       return isPrefix ? { folder, len: folderWords.length } : null;
     })
@@ -142,10 +149,18 @@ async function startSort(options, log, onAmbiguous, signal, waitIfPaused) {
     const name = path.basename(file);
     log(`[${i + 1}/${files.length}] ${name}`, 'header');
 
-    const matches = findMatches(file, targetFolders);
+    const allMatches  = findMatches(file, targetFolders);
+    const matches     = allMatches.filter((f) => !hasSubfolders(f));
+
+    if (allMatches.length === 0) {
+      log('  No matching folder — skipped', 'skip');
+      skipped++;
+      continue;
+    }
 
     if (matches.length === 0) {
-      log('  No matching folder — skipped', 'skip');
+      const names = allMatches.map((f) => path.basename(f)).join(', ');
+      log(`  Matched [${names}] but it contains subfolders — skipped`, 'skip');
       skipped++;
       continue;
     }
