@@ -702,6 +702,7 @@ reviewKeepBtn.addEventListener('click', () => {
 });
 
 reviewDeleteBtn.addEventListener('click', async () => {
+  setReviewBusy(true);
   const file = pendingReview[reviewIndex].file;
   const results = await electron.invoke('conversion:deleteOriginals', [file]);
   if (results[0].success) appendLog(`  DELETED: ${file}`, 'success');

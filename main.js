@@ -325,13 +325,13 @@ ipcMain.handle('resize:confirm', async (event, items) => {
   const results = [];
   for (const { original, tmp } of items) {
     try {
-      fs.renameSync(tmp, original);
+      await fs.promises.rename(tmp, original);
       results.push({ file: original, success: true });
     } catch (err) {
-      // renameSync can fail across drives — fall back to copy + delete
+      // rename can fail across drives — fall back to copy + delete
       try {
-        fs.copyFileSync(tmp, original);
-        fs.unlinkSync(tmp);
+        await fs.promises.copyFile(tmp, original);
+        await fs.promises.unlink(tmp);
         results.push({ file: original, success: true });
       } catch (err2) {
         results.push({ file: original, success: false, error: err2.message });
@@ -342,9 +342,9 @@ ipcMain.handle('resize:confirm', async (event, items) => {
 });
 
 // Discard pending resize temp files without applying changes
-ipcMain.handle('resize:discard', (event, items) => {
+ipcMain.handle('resize:discard', async (event, items) => {
   for (const { tmp } of items) {
-    try { fs.unlinkSync(tmp); } catch {}
+    try { await fs.promises.unlink(tmp); } catch {}
   }
 });
 
@@ -369,9 +369,9 @@ ipcMain.handle('conversion:deleteOriginals', async (event, files) => {
   const results = [];
   for (const filePath of files) {
     let sizeBytes = 0;
-    try { sizeBytes = fs.statSync(filePath).size; } catch {}
+    try { sizeBytes = (await fs.promises.stat(filePath)).size; } catch {}
     try {
-      fs.unlinkSync(filePath);
+      await fs.promises.unlink(filePath);
       results.push({ file: filePath, success: true, sizeBytes });
     } catch (err) {
       results.push({ file: filePath, success: false, error: err.message, sizeBytes: 0 });

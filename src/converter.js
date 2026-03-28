@@ -538,7 +538,7 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
       if (fs.existsSync(dst)) {
         log(`  SKIP (exists): ${base}`, 'skip');
       } else {
-        fs.copyFileSync(archive, dst);
+        await fs.promises.copyFile(archive, dst);
         log(`  Copied: ${base}`, 'success');
         outputs.push(dst);
       }
