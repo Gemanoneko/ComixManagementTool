@@ -331,7 +331,14 @@ async function startResize({ folder }, sendLog, sendProgress, signal) {
   // after an abort), so no worker is left running after startResize returns.
   await Promise.allSettled(Array.from({ length: CONCURRENCY }, processOne));
 
-  if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+  sendProgress(done, cbzFiles.length);
+
+  if (signal?.aborted) {
+    // Return partial results so the caller can offer to apply or discard
+    // any files that finished resizing before the cancel was processed.
+    const totalSavedBytes = resized.reduce((sum, r) => sum + Math.max(0, r.originalSize - r.newSize), 0);
+    return { resized, skipped, errors, totalSavedBytes, aborted: true };
+  }
 
   sendProgress(cbzFiles.length, cbzFiles.length);
 

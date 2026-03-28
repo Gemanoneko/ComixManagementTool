@@ -436,13 +436,22 @@ electron.on('resize:complete', (result) => {
 
   const resizeElapsed = resizeStart ? formatDuration(Date.now() - resizeStart) : null;
 
-  if (result.aborted) {
-    appendLog(`Resize cancelled${resizeElapsed ? ` after ${resizeElapsed}` : ''}.`, 'warn');
-    return;
-  }
-
   const skipped = result.skipped || 0;
   const errors  = result.errors  || [];
+
+  if (result.aborted) {
+    if (pendingResized.length > 0) {
+      appendLog(
+        `Resize cancelled${resizeElapsed ? ` after ${resizeElapsed}` : ''} — ` +
+        `${pendingResized.length} file(s) finished before cancellation.`,
+        'warn'
+      );
+      showResizeModal(pendingResized, skipped, errors);
+    } else {
+      appendLog(`Resize cancelled${resizeElapsed ? ` after ${resizeElapsed}` : ''}.`, 'warn');
+    }
+    return;
+  }
 
   if (pendingResized.length > 0) {
     if (resizeElapsed) appendLog(`Scan complete — elapsed: ${resizeElapsed}`, 'info');
