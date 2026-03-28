@@ -80,6 +80,16 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+// Abort any running child processes before quitting so the event loop drains
+// cleanly. Without this, awaited execFile handles keep the process alive even
+// after all windows are closed, leaving a ghost process in Task Manager.
+app.on('before-quit', () => {
+  clearPause();
+  activeAbortController?.abort();
+  sortAbortController?.abort();
+  resizeAbortController?.abort();
+});
+
 // App version
 ipcMain.handle('app:version', () => app.getVersion());
 

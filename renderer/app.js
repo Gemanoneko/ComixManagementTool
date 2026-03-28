@@ -15,6 +15,9 @@ let pendingReview    = [];
 let reviewIndex      = 0;
 
 let lastCbzBytes     = 0;    // total size of CBZ files created in the last conversion session
+let convertStart     = 0;
+let resizeStart      = 0;
+let sortStart        = 0;
 
 let resizeFolder     = null;
 let isResizing       = false;
@@ -178,6 +181,7 @@ async function startConversion() {
   document.querySelectorAll('.preset-btn').forEach((b) => (b.disabled = true));
   setTabsDisabled(true);
 
+  convertStart = Date.now();
   logContainer.innerHTML = '';
   progressWrap.classList.remove('hidden');
   setProgress(0, 0);
@@ -223,8 +227,12 @@ electron.on('conversion:complete', (result) => {
   const allDeletable = [...converted, ...preExisting];
 
   lastCbzBytes = result.totalCbzBytes || 0;
-  if (lastCbzBytes > 0) {
-    appendLog(`New CBZ files created this session: ${formatBytes(lastCbzBytes)}`, 'info');
+  const convertElapsed = convertStart ? formatDuration(Date.now() - convertStart) : null;
+  if (lastCbzBytes > 0 || convertElapsed) {
+    const parts = [];
+    if (lastCbzBytes > 0)  parts.push(`new CBZs: ${formatBytes(lastCbzBytes)}`);
+    if (convertElapsed)    parts.push(`elapsed: ${convertElapsed}`);
+    appendLog(parts.join('  |  '), 'info');
   }
 
   pendingReview = needsReview;
@@ -283,10 +291,10 @@ function setProgress(current, total, etaMs = 0) {
   const pct = Math.round((current / total) * 100);
   progressFill.style.width = `${pct}%`;
   progressLabel.textContent = `${current} / ${total}`;
-  etaLabel.textContent = current < total && etaMs > 0 ? `ETA: ${formatEta(etaMs)}` : '';
+  etaLabel.textContent = current < total && etaMs > 0 ? `ETA: ${formatDuration(etaMs)}` : '';
 }
 
-function formatEta(ms) {
+function formatDuration(ms) {
   const totalSec = Math.round(ms / 1000);
   if (totalSec < 60) return `${totalSec}s`;
   const m = Math.floor(totalSec / 60);
@@ -394,6 +402,7 @@ startResizeBtn.addEventListener('click', async () => {
   setTabsDisabled(true);
 
   logContainer.innerHTML = '';
+  resizeStart = Date.now();
   resizeProgressWrap.classList.remove('hidden');
   setResizeProgress(0, 0);
 
@@ -422,8 +431,10 @@ electron.on('resize:complete', (result) => {
 
   pendingResized = result.resized || [];
 
+  const resizeElapsed = resizeStart ? formatDuration(Date.now() - resizeStart) : null;
+
   if (result.aborted) {
-    appendLog('Resize cancelled.', 'warn');
+    appendLog(`Resize cancelled${resizeElapsed ? ` after ${resizeElapsed}` : ''}.`, 'warn');
     return;
   }
 
@@ -431,9 +442,11 @@ electron.on('resize:complete', (result) => {
   const errors  = result.errors  || [];
 
   if (pendingResized.length > 0) {
+    if (resizeElapsed) appendLog(`Scan complete — elapsed: ${resizeElapsed}`, 'info');
     showResizeModal(pendingResized, skipped, errors);
   } else {
-    const msg = `Done — ${skipped} file(s) already within 4 500 px, ${errors.length} error(s).`;
+    const msg = `Done — ${skipped} file(s) already within 4 500 px, ${errors.length} error(s).` +
+                (resizeElapsed ? `  Elapsed: ${resizeElapsed}.` : '');
     appendLog(msg, errors.length > 0 ? 'warn' : 'success');
   }
 });
@@ -530,6 +543,7 @@ sortBtn.addEventListener('click', async () => {
   browseSortTargetBtn.disabled = true;
   setTabsDisabled(true);
 
+  sortStart = Date.now();
   logContainer.innerHTML = '';
 
   await electron.invoke('sort:start', {
@@ -547,15 +561,28 @@ electron.on('sort:ambiguous', ({ file, matches }) => {
   showSortModal(file, matches);
 });
 
-electron.on('sort:complete', ({ moved, skipped, manual }) => {
+electron.on('sort:complete', ({ moved, skipped, manual, totalMovedBytes }) => {
   isSorting = false;
   browseSortSourceBtn.disabled = false;
   browseSortTargetBtn.disabled = false;
   setTabsDisabled(false);
   updateSortBtn();
 
+  const sortElapsed = sortStart ? formatDuration(Date.now() - sortStart) : null;
   appendLog('', 'info');
-  appendLog(`Sort complete — moved: ${moved}, skipped: ${skipped}, manual: ${manual}`, 'success');
+  appendLog(
+    `Sort complete — moved: ${moved}, skipped: ${skipped}, manual: ${manual}` +
+    (sortElapsed ? `  |  elapsed: ${sortElapsed}` : ''),
+    'success'
+  );
+
+  // Show space freed on the source drive only when files crossed to a different drive.
+  // Same-drive moves are renames — no disk space is freed or consumed.
+  const sourceDrive = sortSourceFolder ? sortSourceFolder.slice(0, 2).toLowerCase() : '';
+  const targetDrive = sortTargetFolder ? sortTargetFolder.slice(0, 2).toLowerCase() : '';
+  if (sourceDrive && targetDrive && sourceDrive !== targetDrive && totalMovedBytes > 0) {
+    appendLog(`Source drive (${sourceDrive.toUpperCase()}) freed: ${formatBytes(totalMovedBytes)}`, 'success');
+  }
 });
 
 function showSortModal(file, matches) {

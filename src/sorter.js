@@ -139,7 +139,7 @@ async function startSort(options, log, onAmbiguous, signal) {
   log(`Scanning: ${sourceFolder}`, 'header');
   log(`Found ${files.length} .cbz file(s).  Target has ${leafFolders.length} leaf folder(s).\n`, 'info');
 
-  let moved = 0, skipped = 0, manual = 0;
+  let moved = 0, skipped = 0, manual = 0, totalMovedBytes = 0;
 
   for (let i = 0; i < files.length; i++) {
     if (signal?.aborted) break;
@@ -178,7 +178,10 @@ async function startSort(options, log, onAmbiguous, signal) {
     }
 
     try {
+      let sizeBytes = 0;
+      try { sizeBytes = fs.statSync(file).size; } catch {}
       moveFile(file, destFile);
+      totalMovedBytes += sizeBytes;
       log(`  → ${path.basename(dest)}`, 'success');
       moved++;
     } catch (err) {
@@ -187,7 +190,7 @@ async function startSort(options, log, onAmbiguous, signal) {
     }
   }
 
-  return { moved, skipped, manual };
+  return { moved, skipped, manual, totalMovedBytes };
 }
 
 module.exports = { startSort };
