@@ -13,6 +13,9 @@ const IMAGE_EXTS    = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp',
 const MAX_LONG_SIDE = 4500;
 const QUALITY       = 90;
 const BATCH_SIZE    = 50;
+// Process this many CBZ files concurrently. Each worker holds one temp dir on
+// disk at a time, so keep this conservative to avoid saturating the drive.
+const CONCURRENCY   = Math.min(os.cpus().length, 4);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -57,40 +60,95 @@ async function scanCbz(folder) {
   return results;
 }
 
-/**
- * Run `magick identify -ping -format "%f\t%w\t%h\n"` on files in batches.
- * Returns a Map<filePath, { w, h }>.
- */
-async function identifyImages(imageMagick, files, signal) {
-  const dims = new Map();
-  for (let i = 0; i < files.length; i += BATCH_SIZE) {
-    const batch = files.slice(i, i + BATCH_SIZE);
-    let stdout;
-    try {
-      ({ stdout } = await execFilePromise(
-        imageMagick,
-        ['identify', '-ping', '-format', '%f\t%w\t%h\n', ...batch],
-        signal
-      ));
-    } catch (err) {
-      // When signal aborts, child.kill() fires but the error won't carry
-      // name:'AbortError' — check signal directly so we propagate cleanly.
-      if (err.name === 'AbortError' || signal?.aborted) throw err;
-      continue; // batch failed for another reason; skip it (those pages won't be flagged)
-    }
-    for (const line of stdout.split(/\r?\n/)) {
-      const parts = line.split('\t');
-      if (parts.length < 3) continue;
-      const name = parts[0].trim();
-      const w    = parseInt(parts[1], 10);
-      const h    = parseInt(parts[2], 10);
-      if (!name || isNaN(w) || isNaN(h)) continue;
-      // Match basename back to full path (all files in tmpDir, basenames unique)
-      const full = batch.find((f) => path.basename(f) === name);
-      if (full) dims.set(full, { w, h });
-    }
+// ── Fast image-dimension reader (no external process) ─────────────────────────
+//
+// Reads only the header bytes of each image file to extract width × height.
+// This replaces spawning `magick identify` (a new process per batch), which
+// dominates per-file time on large libraries.
+//
+// Supported natively: JPEG, PNG, GIF, BMP, WebP.
+// Unsupported (TIFF, AVIF, …): getDimensions returns null → treated as within
+// limits and left untouched.  These formats are rare in CBZ collections.
+
+function parseDimensions(buf, ext) {
+  // ── PNG ── 8-byte sig; IHDR at offset 8: width @16, height @20 (BE uint32)
+  if (ext === '.png') {
+    if (buf.length < 24 || buf[0] !== 0x89 || buf[1] !== 0x50) return null;
+    return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
   }
-  return dims;
+
+  // ── GIF ── "GIF87a" / "GIF89a"; width @6, height @8 (LE uint16)
+  if (ext === '.gif') {
+    if (buf.length < 10 || buf[0] !== 0x47 || buf[1] !== 0x49) return null;
+    return { w: buf.readUInt16LE(6), h: buf.readUInt16LE(8) };
+  }
+
+  // ── BMP ── "BM" header; width @18, height @22 (LE int32; negative = top-down)
+  if (ext === '.bmp') {
+    if (buf.length < 26 || buf[0] !== 0x42 || buf[1] !== 0x4D) return null;
+    return { w: buf.readInt32LE(18), h: Math.abs(buf.readInt32LE(22)) };
+  }
+
+  // ── WebP ── RIFF container; three sub-formats
+  if (ext === '.webp') {
+    if (buf.length < 30) return null;
+    if (buf.toString('latin1', 0, 4) !== 'RIFF' ||
+        buf.toString('latin1', 8, 12) !== 'WEBP') return null;
+    const fmt = buf.toString('latin1', 12, 16);
+    if (fmt === 'VP8 ') {  // lossy
+      return { w: (buf.readUInt16LE(26) & 0x3FFF) + 1,
+               h: (buf.readUInt16LE(28) & 0x3FFF) + 1 };
+    }
+    if (fmt === 'VP8L') {  // lossless — 4 packed bytes at offset 21
+      const b = buf.readUInt32LE(21);
+      return { w: (b & 0x3FFF) + 1, h: ((b >> 14) & 0x3FFF) + 1 };
+    }
+    if (fmt === 'VP8X') {  // extended — 24-bit LE at offsets 24 / 27
+      return { w: (buf[24] | (buf[25] << 8) | (buf[26] << 16)) + 1,
+               h: (buf[27] | (buf[28] << 8) | (buf[29] << 16)) + 1 };
+    }
+    return null;
+  }
+
+  // ── JPEG ── scan marker chain for SOF0/SOF2/… segment
+  if (ext === '.jpg' || ext === '.jpeg') {
+    if (buf.length < 4 || buf[0] !== 0xFF || buf[1] !== 0xD8) return null;
+    let i = 2;
+    while (i + 8 < buf.length) {
+      if (buf[i] !== 0xFF) break;
+      const m = buf[i + 1];
+      if (m === 0xD9 || m === 0xDA) break; // EOI / SOS — no more header segments
+      // SOF markers: C0-C3, C5-C7, C9-CB, CD-CF
+      if ((m >= 0xC0 && m <= 0xC3) || (m >= 0xC5 && m <= 0xC7) ||
+          (m >= 0xC9 && m <= 0xCB) || (m >= 0xCD && m <= 0xCF)) {
+        // [FF][marker][len 2B][precision 1B][height 2B][width 2B]
+        return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) };
+      }
+      if (m === 0xFF) { i++; continue; } // padding byte — skip
+      const segLen = buf.readUInt16BE(i + 2);
+      if (segLen < 2) break;
+      i += 2 + segLen;
+    }
+    return null;
+  }
+
+  return null; // TIFF, AVIF, etc. — not supported natively
+}
+
+async function getDimensions(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  // JPEG SOF can appear after a large EXIF block — read up to 64 KB.
+  // All other formats have dimensions in their first ≤ 30 bytes.
+  const readSize = (ext === '.jpg' || ext === '.jpeg') ? 65536 : 64;
+  try {
+    const fh = await fs.promises.open(filePath, 'r');
+    const buf = Buffer.alloc(readSize);
+    const { bytesRead } = await fh.read(buf, 0, readSize, 0);
+    await fh.close();
+    return parseDimensions(buf.subarray(0, bytesRead), ext);
+  } catch {
+    return null;
+  }
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
@@ -99,8 +157,11 @@ async function identifyImages(imageMagick, files, signal) {
  * Scans `folder` recursively for CBZ files, identifies oversized pages,
  * resizes them (never upscales), repacks, and validates.
  *
- * Each result item carries { original, tmp, pagesResized, totalPages, originalSize, newSize }
- * so the caller can compute and display space savings.
+ * CBZs are processed CONCURRENCY-at-a-time.  Each worker:
+ *   1. Extracts the CBZ with 7-Zip
+ *   2. Reads image dimensions from file headers (pure Node.js — no process spawn)
+ *   3. If any page > MAX_LONG_SIDE: mogrify + repack + validate
+ *   4. Otherwise: skip
  *
  * @param {{ folder: string }} options
  * @param {(msg: string, type?: string) => void} sendLog
@@ -122,146 +183,161 @@ async function startResize({ folder }, sendLog, sendProgress, signal) {
     return { resized: [], skipped: 0, errors: [], totalSavedBytes: 0 };
   }
 
-  sendLog(`Found ${cbzFiles.length} CBZ file(s). Checking page dimensions…`, 'info');
+  sendLog(`Found ${cbzFiles.length} CBZ file(s). Processing with ${CONCURRENCY} worker(s)…`, 'info');
+  sendProgress(0, cbzFiles.length);
 
+  // Shared state — safe to mutate without locks (JS is single-threaded)
   const resized = [];
   let   skipped = 0;
   const errors  = [];
+  let   done    = 0;
 
-  for (let i = 0; i < cbzFiles.length; i++) {
-    if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+  // ── Worker pool ───────────────────────────────────────────────────────────
+  // nextIdx is read-and-incremented synchronously, so each worker gets a
+  // unique file index with no races.
+  let nextIdx = 0;
 
-    const cbzPath = cbzFiles[i];
-    sendProgress(i, cbzFiles.length);
-    sendLog(`[${i + 1}/${cbzFiles.length}] ${path.basename(cbzPath)}`, 'header');
+  async function processOne() {
+    while (true) {
+      if (signal?.aborted) return;
+      const i = nextIdx++;
+      if (i >= cbzFiles.length) return;
 
-    const tmpDir = path.join(os.tmpdir(), `cbz_resize_${crypto.randomBytes(6).toString('hex')}`);
-    let   tmpCbz = null;
+      const cbzPath = cbzFiles[i];
+      const tag     = `[${i + 1}/${cbzFiles.length}]`;
+      const log     = (msg, type = 'info') => sendLog(`${tag} ${msg}`, type);
 
-    try {
-      fs.mkdirSync(tmpDir, { recursive: true });
+      log(path.basename(cbzPath), 'header');
 
-      // Record original size for savings calculation
-      const originalSize = fs.statSync(cbzPath).size;
+      const tmpDir = path.join(os.tmpdir(), `cbz_resize_${crypto.randomBytes(6).toString('hex')}`);
+      let   tmpCbz = null;
 
-      // 1. Extract flat (no subdirs) into tmpDir
-      await execFilePromise(sevenZip, ['e', cbzPath, `-o${tmpDir}`, '-y'], signal);
-
-      // 2. Collect image files, sorted for correct page order
-      const allFiles = fs.readdirSync(tmpDir)
-        .filter((f) => IMAGE_EXTS.has(path.extname(f).toLowerCase()))
-        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-        .map((f) => path.join(tmpDir, f));
-
-      if (allFiles.length === 0) {
-        sendLog('  No image files found — skipped.', 'skip');
-        skipped++;
-        continue;
-      }
-
-      // 3. Identify dimensions; find oversized pages
-      const dims      = await identifyImages(imageMagick, allFiles, signal);
-      const oversized = allFiles.filter((f) => {
-        const d = dims.get(f);
-        return d && Math.max(d.w, d.h) > MAX_LONG_SIDE;
-      });
-
-      if (oversized.length === 0) {
-        sendLog(`  All ${allFiles.length} pages within ${MAX_LONG_SIDE}px — skipped.`, 'skip');
-        skipped++;
-        continue;
-      }
-
-      sendLog(
-        `  ${oversized.length} / ${allFiles.length} page(s) exceed ${MAX_LONG_SIDE}px — resizing…`,
-        'info'
-      );
-
-      // 4. Mogrify oversized pages in-place (never upscales — ">" flag).
-      //    Batch into groups of BATCH_SIZE to stay well under the Windows
-      //    32 767-character command-line limit for large artbooks.
-      for (let b = 0; b < oversized.length; b += BATCH_SIZE) {
-        const batch = oversized.slice(b, b + BATCH_SIZE);
-        await execFilePromise(
-          imageMagick,
-          ['mogrify', '-resize', `${MAX_LONG_SIDE}x${MAX_LONG_SIDE}>`, '-quality', String(QUALITY), ...batch],
-          signal
-        );
-      }
-
-      // 5. Pack all pages into a new temp CBZ via 7-Zip store mode
-      tmpCbz = path.join(os.tmpdir(), `cbz_resized_${crypto.randomBytes(6).toString('hex')}.cbz`);
-      const basenames = allFiles.map((f) => path.basename(f));
-      const listPath  = path.join(tmpDir, '.cbzpack.lst');
-      fs.writeFileSync(listPath, basenames.join('\n'), 'utf8');
       try {
-        await execFilePromise(
-          sevenZip,
-          ['a', '-tzip', '-mx=0', tmpCbz, `@${listPath}`],
-          signal,
-          { cwd: tmpDir }
+        fs.mkdirSync(tmpDir, { recursive: true });
+
+        const originalSize = fs.statSync(cbzPath).size;
+
+        // 1. Extract flat (no subdirs) into tmpDir
+        await execFilePromise(sevenZip, ['e', cbzPath, `-o${tmpDir}`, '-y'], signal);
+
+        // 2. Collect image files, sorted for correct page order
+        const allFiles = fs.readdirSync(tmpDir)
+          .filter((f) => IMAGE_EXTS.has(path.extname(f).toLowerCase()))
+          .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+          .map((f) => path.join(tmpDir, f));
+
+        if (allFiles.length === 0) {
+          log('No image files found — skipped.', 'skip');
+          skipped++;
+          continue;
+        }
+
+        // 3. Read image dimensions from file headers — no external process needed.
+        //    getDimensions reads at most 64 KB per file (for JPEG) or 64 bytes
+        //    (for PNG/GIF/BMP/WebP).  All reads run concurrently via Promise.all.
+        const dims = new Map();
+        await Promise.all(allFiles.map(async (f) => {
+          const d = await getDimensions(f);
+          if (d) dims.set(f, d);
+        }));
+
+        if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+
+        const oversized = allFiles.filter((f) => {
+          const d = dims.get(f);
+          return d && Math.max(d.w, d.h) > MAX_LONG_SIDE;
+        });
+
+        if (oversized.length === 0) {
+          log(`All ${allFiles.length} pages within ${MAX_LONG_SIDE}px — skipped.`, 'skip');
+          skipped++;
+          continue;
+        }
+
+        log(`${oversized.length} / ${allFiles.length} page(s) exceed ${MAX_LONG_SIDE}px — resizing…`, 'info');
+
+        // 4. Mogrify oversized pages in-place (never upscales — ">" flag).
+        //    Batch into groups of BATCH_SIZE to stay under the Windows
+        //    32 767-character command-line limit for large artbooks.
+        for (let b = 0; b < oversized.length; b += BATCH_SIZE) {
+          if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+          const batch = oversized.slice(b, b + BATCH_SIZE);
+          await execFilePromise(
+            imageMagick,
+            ['mogrify', '-resize', `${MAX_LONG_SIDE}x${MAX_LONG_SIDE}>`, '-quality', String(QUALITY), ...batch],
+            signal
+          );
+        }
+
+        // 5. Pack all pages into a new temp CBZ via 7-Zip store mode
+        tmpCbz = path.join(os.tmpdir(), `cbz_resized_${crypto.randomBytes(6).toString('hex')}.cbz`);
+        const basenames = allFiles.map((f) => path.basename(f));
+        const listPath  = path.join(tmpDir, '.cbzpack.lst');
+        fs.writeFileSync(listPath, basenames.join('\n'), 'utf8');
+        try {
+          await execFilePromise(
+            sevenZip,
+            ['a', '-tzip', '-mx=0', tmpCbz, `@${listPath}`],
+            signal,
+            { cwd: tmpDir }
+          );
+        } catch (err) {
+          try { await fs.promises.unlink(tmpCbz); } catch {}
+          throw err;
+        } finally {
+          try { fs.unlinkSync(listPath); } catch {}
+        }
+
+        // 6. Validate the new CBZ
+        const { valid, reason } = await validateCbz(tmpCbz, allFiles.length);
+        if (!valid) {
+          log(`Validation failed: ${reason}`, 'error');
+          try { await fs.promises.unlink(tmpCbz); } catch {}
+          errors.push({ file: cbzPath, reason });
+          tmpCbz = null;
+          continue;
+        }
+
+        const newSize  = fs.statSync(tmpCbz).size;
+        const saved    = originalSize - newSize;
+        log(
+          `OK — ${oversized.length} page(s) resized${saved > 0 ? ` (saves ${formatBytes(saved)})` : ''}. Pending confirmation.`,
+          'success'
         );
+        resized.push({
+          original: cbzPath, tmp: tmpCbz,
+          pagesResized: oversized.length, totalPages: allFiles.length,
+          originalSize, newSize,
+        });
+        tmpCbz = null; // ownership transferred to caller
+
       } catch (err) {
-        try { fs.unlinkSync(tmpCbz); } catch {}
-        throw err;
-      } finally {
-        try { fs.unlinkSync(listPath); } catch {}
-      }
-
-      // 6. Validate the new CBZ
-      const { valid, reason } = await validateCbz(tmpCbz, allFiles.length);
-      if (!valid) {
-        sendLog(`  Validation failed: ${reason}`, 'error');
-        try { fs.unlinkSync(tmpCbz); } catch {}
+        if (err.name === 'AbortError' || signal?.aborted) {
+          if (tmpCbz) try { await fs.promises.unlink(tmpCbz); } catch {}
+          return; // let worker exit cleanly; abort is detected at top of next iteration
+        }
+        const reason = err.stderr?.trim() || err.message;
+        log(`ERROR: ${reason}`, 'error');
         errors.push({ file: cbzPath, reason });
-        tmpCbz = null;
-        continue;
+      } finally {
+        try { await fs.promises.rm(tmpDir, { recursive: true, force: true }); } catch {}
+        done++;
+        sendProgress(done, cbzFiles.length);
       }
-
-      const newSize  = fs.statSync(tmpCbz).size;
-      const saved    = originalSize - newSize;
-      const savedStr = saved > 0 ? ` (saves ${formatBytes(saved)})` : '';
-
-      sendLog(
-        `  OK — ${oversized.length} page(s) resized${savedStr}. Pending confirmation.`,
-        'success'
-      );
-      resized.push({
-        original:     cbzPath,
-        tmp:          tmpCbz,
-        pagesResized: oversized.length,
-        totalPages:   allFiles.length,
-        originalSize,
-        newSize,
-      });
-      tmpCbz = null; // ownership transferred to result; caller cleans up
-
-    } catch (err) {
-      // Check signal?.aborted in addition to name check: when a child process is
-      // killed via child.kill(), the execFile error does not carry name:'AbortError'.
-      if (err.name === 'AbortError' || signal?.aborted) {
-        if (tmpCbz) try { fs.unlinkSync(tmpCbz); } catch {}
-        throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
-      }
-      // Prefer stderr (clean 7-Zip / ImageMagick error text) over err.message,
-      // which includes the full command invocation and is very noisy.
-      const reason = err.stderr?.trim() || err.message;
-      sendLog(`  ERROR: ${reason}`, 'error');
-      errors.push({ file: cbzPath, reason });
-    } finally {
-      try { await fs.promises.rm(tmpDir, { recursive: true, force: true }); } catch {}
     }
   }
 
+  // Promise.allSettled waits for every worker to finish (including draining
+  // after an abort), so no worker is left running after startResize returns.
+  await Promise.allSettled(Array.from({ length: CONCURRENCY }, processOne));
+
+  if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+
   sendProgress(cbzFiles.length, cbzFiles.length);
 
-  // Summary
   const totalSavedBytes = resized.reduce((sum, r) => sum + Math.max(0, r.originalSize - r.newSize), 0);
   if (resized.length > 0) {
-    sendLog(
-      `\nReady — ${resized.length} file(s) to replace, ${formatBytes(totalSavedBytes)} to be freed.`,
-      'success'
-    );
+    sendLog(`\nReady — ${resized.length} file(s) to replace, ${formatBytes(totalSavedBytes)} to be freed.`, 'success');
   }
   if (errors.length > 0) {
     sendLog(`${errors.length} file(s) failed — see above for details.`, 'warn');
