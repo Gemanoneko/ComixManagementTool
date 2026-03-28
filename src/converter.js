@@ -83,9 +83,9 @@ function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cbz_'));
 }
 
-function removeTempDir(dir) {
+async function removeTempDir(dir) {
   try {
-    fs.rmSync(dir, { recursive: true, force: true });
+    await fs.promises.rm(dir, { recursive: true, force: true });
   } catch { /* best effort */ }
 }
 
@@ -815,7 +815,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
     return { success: outputs.length > 0, outcome, outputs, folderName, isPdf, pdfPages };
 
   } finally {
-    removeTempDir(tmpDir);
+    await removeTempDir(tmpDir);
   }
 }
 
@@ -841,7 +841,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
  *   Example: "[ENG] Urotsukidoji\" folder + "[RUS] Urotsukidoji vol01.cbz"
  *            → "Urotsukidoji\" folder containing both
  */
-function reorganizeScatteredCbzs(rootDir, log) {
+async function reorganizeScatteredCbzs(rootDir, log) {
   let moved = 0;
 
   function stripTags(name) {
@@ -906,7 +906,8 @@ function reorganizeScatteredCbzs(rootDir, log) {
     }
   }
 
-  function walk(dir) {
+  async function walk(dir) {
+    await new Promise((r) => setImmediate(r)); // yield so IPC messages can be processed
     // ── Pass 0: flatten self-nesting caused by previous buggy runs ───────────
     // Catches both exact-name repeats ([ENG] X / [ENG] X) and normalisation
     // variants (v01 02 / v01-02 — hyphens vs spaces treated as equivalent).
@@ -1063,11 +1064,11 @@ function reorganizeScatteredCbzs(rootDir, log) {
     let entries3;
     try { entries3 = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of entries3.filter((e) => e.isDirectory())) {
-      walk(path.join(dir, e.name));
+      await walk(path.join(dir, e.name));
     }
   }
 
-  walk(rootDir);
+  await walk(rootDir);
   return moved;
 }
 
@@ -1130,7 +1131,7 @@ async function findOrphanedOriginals(rootDir) {
     }
   }
 
-  walk(rootDir);
+  await walk(rootDir);
   return { simple, needsReview };
 }
 
@@ -1190,7 +1191,7 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
   // Reorganize scattered multi-chapter CBZs first, before converting.
   // Runs even when there are no archives to convert — just select the folder
   // and click Start Conversion to reorganize CBZ-only folders.
-  const preReorganized = reorganizeScatteredCbzs(rootFolder, log);
+  const preReorganized = await reorganizeScatteredCbzs(rootFolder, log);
   if (preReorganized > 0) {
     log(`Reorganized ${preReorganized} CBZ(s) into subfolders.\n`, 'info');
   }

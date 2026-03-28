@@ -7,10 +7,11 @@ const CONVERTIBLE_EXTS = new Set(['.cbr', '.rar', '.zip', '.pdf']);
  * Recursively walk rootDir and return all files with convertible extensions.
  * Already-.cbz files are intentionally skipped.
  */
-function scanForFiles(rootDir) {
+async function scanForFiles(rootDir) {
   const results = [];
 
-  function walk(dir) {
+  async function walk(dir) {
+    await new Promise((r) => setImmediate(r)); // yield so IPC messages can be processed
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -21,7 +22,7 @@ function scanForFiles(rootDir) {
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        walk(fullPath);
+        await walk(fullPath);
       } else if (entry.isFile()) {
         const ext = path.extname(entry.name).toLowerCase();
         if (CONVERTIBLE_EXTS.has(ext)) {
@@ -31,7 +32,7 @@ function scanForFiles(rootDir) {
     }
   }
 
-  walk(rootDir);
+  await walk(rootDir);
   return results;
 }
 

@@ -40,19 +40,20 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
-function scanCbz(folder) {
+async function scanCbz(folder) {
   const results = [];
-  function walk(dir) {
+  async function walk(dir) {
+    await new Promise((r) => setImmediate(r)); // yield so IPC messages can be processed
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
     catch { return; }
     for (const e of entries) {
       const full = path.join(dir, e.name);
-      if (e.isDirectory()) walk(full);
+      if (e.isDirectory()) await walk(full);
       else if (e.isFile() && path.extname(e.name).toLowerCase() === '.cbz') results.push(full);
     }
   }
-  walk(folder);
+  await walk(folder);
   return results;
 }
 
@@ -248,7 +249,7 @@ async function startResize({ folder }, sendLog, sendProgress, signal) {
       sendLog(`  ERROR: ${reason}`, 'error');
       errors.push({ file: cbzPath, reason });
     } finally {
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      try { await fs.promises.rm(tmpDir, { recursive: true, force: true }); } catch {}
     }
   }
 
