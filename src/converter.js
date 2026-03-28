@@ -1196,7 +1196,7 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
     log(`Reorganized ${preReorganized} CBZ(s) into subfolders.\n`, 'info');
   }
 
-  const files = scanForFiles(rootFolder);
+  const files = await scanForFiles(rootFolder);
 
   if (files.length === 0) {
     log('No convertible files found (.cbr, .rar, .zip, .pdf).', 'info');

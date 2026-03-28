@@ -115,7 +115,7 @@ async function startResize({ folder }, sendLog, sendProgress, signal) {
   if (!imageMagick) throw new Error('ImageMagick not found — cannot resize CBZs');
 
   sendLog('Scanning for CBZ files…', 'info');
-  const cbzFiles = scanCbz(folder);
+  const cbzFiles = await scanCbz(folder);
 
   if (cbzFiles.length === 0) {
     sendLog('No CBZ files found.', 'warn');
