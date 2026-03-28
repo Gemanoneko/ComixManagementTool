@@ -27,30 +27,15 @@ function normalise(name) {
 // ─── Folder scanning ─────────────────────────────────────────────────────────
 
 /**
- * Return all subdirectories under dir (at any depth) that have NO
- * subdirectories themselves (i.e. leaf folders where individual issues live).
- *
- * Recursing handles nested organisation like:
- *   Batman/
- *     Batman (1940)/   ← leaf
- *     Batman (2011)/   ← leaf
+ * Return immediate subdirectories of dir (one level deep only).
+ * The user manages deeper nesting manually.
  */
-function getLeafFolders(dir) {
+function getFirstLevelFolders(dir) {
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
-
-  const results = [];
-  for (const e of entries.filter((e) => e.isDirectory())) {
-    const subPath = path.join(dir, e.name);
-    let sub;
-    try { sub = fs.readdirSync(subPath, { withFileTypes: true }); } catch { continue; }
-    if (sub.some((se) => se.isDirectory())) {
-      results.push(...getLeafFolders(subPath)); // intermediate — recurse
-    } else {
-      results.push(subPath); // leaf
-    }
-  }
-  return results;
+  return entries
+    .filter((e) => e.isDirectory())
+    .map((e) => path.join(dir, e.name));
 }
 
 // ─── Matching ────────────────────────────────────────────────────────────────
@@ -105,7 +90,7 @@ function moveFile(src, dst) {
 // ─── Main pipeline ───────────────────────────────────────────────────────────
 
 /**
- * Sort .cbz files from sourceFolder into matching leaf folders under targetFolder.
+ * Sort .cbz files from sourceFolder into matching first-level subfolders of targetFolder.
  *
  * @param {{ sourceFolder: string, targetFolder: string }} options
  * @param {(msg: string, type: string) => void} log
@@ -113,9 +98,10 @@ function moveFile(src, dst) {
  *        Called when multiple equally-specific folders match.
  *        Resolve with a folder path to move there, or null to skip.
  * @param {AbortSignal} [signal]
- * @returns {Promise<{ moved: number, skipped: number, manual: number }>}
+ * @param {(signal: AbortSignal) => Promise<void>} [waitIfPaused]
+ * @returns {Promise<{ moved: number, skipped: number, manual: number, totalMovedBytes: number }>}
  */
-async function startSort(options, log, onAmbiguous, signal) {
+async function startSort(options, log, onAmbiguous, signal, waitIfPaused) {
   const { sourceFolder, targetFolder } = options;
 
   // Collect .cbz files at the TOP level of source only (no recursion)
@@ -126,29 +112,37 @@ async function startSort(options, log, onAmbiguous, signal) {
       .map((e) => path.join(sourceFolder, e.name));
   } catch (err) {
     log(`ERROR reading source folder — ${err.message}`, 'error');
-    return { moved: 0, skipped: 0, manual: 0 };
+    return { moved: 0, skipped: 0, manual: 0, totalMovedBytes: 0 };
   }
 
   if (files.length === 0) {
     log('No .cbz files found in source folder.', 'info');
-    return { moved: 0, skipped: 0, manual: 0 };
+    return { moved: 0, skipped: 0, manual: 0, totalMovedBytes: 0 };
   }
 
-  const leafFolders = getLeafFolders(targetFolder);
+  const targetFolders = getFirstLevelFolders(targetFolder);
 
   log(`Scanning: ${sourceFolder}`, 'header');
-  log(`Found ${files.length} .cbz file(s).  Target has ${leafFolders.length} leaf folder(s).\n`, 'info');
+  log(`Found ${files.length} .cbz file(s).  Target has ${targetFolders.length} folder(s).\n`, 'info');
 
   let moved = 0, skipped = 0, manual = 0, totalMovedBytes = 0;
 
   for (let i = 0; i < files.length; i++) {
     if (signal?.aborted) break;
 
+    if (waitIfPaused) {
+      try { await waitIfPaused(signal); } catch (err) {
+        if (err.name === 'AbortError') break;
+        throw err;
+      }
+    }
+    if (signal?.aborted) break;
+
     const file = files[i];
     const name = path.basename(file);
     log(`[${i + 1}/${files.length}] ${name}`, 'header');
 
-    const matches = findMatches(file, leafFolders);
+    const matches = findMatches(file, targetFolders);
 
     if (matches.length === 0) {
       log('  No matching folder — skipped', 'skip');

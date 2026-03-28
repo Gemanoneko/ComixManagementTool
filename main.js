@@ -85,6 +85,7 @@ app.on('window-all-closed', () => {
 // after all windows are closed, leaving a ghost process in Task Manager.
 app.on('before-quit', () => {
   clearPause();
+  clearSortPause();
   activeAbortController?.abort();
   sortAbortController?.abort();
   resizeAbortController?.abort();
@@ -174,6 +175,26 @@ ipcMain.handle('conversion:cancel', () => {
 // ── Sort Comics ───────────────────────────────────────────────────────────────
 let sortAbortController       = null;
 let pendingSortChoiceResolve  = null;
+let sortPausePromise          = null;
+let sortPauseResolve          = null;
+
+function waitIfSortPaused(signal) {
+  if (!sortPausePromise) return Promise.resolve();
+  return Promise.race([
+    sortPausePromise,
+    new Promise((_, reject) => {
+      const onAbort = () => reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener('abort', onAbort, { once: true });
+    }),
+  ]);
+}
+
+function clearSortPause() {
+  if (sortPauseResolve) sortPauseResolve();
+  sortPauseResolve = null;
+  sortPausePromise = null;
+}
 
 ipcMain.handle('sort:start', async (event, { sourceFolder, targetFolder }) => {
   sortAbortController = new AbortController();
@@ -199,14 +220,33 @@ ipcMain.handle('sort:start', async (event, { sourceFolder, targetFolder }) => {
 
   try {
     const { startSort } = require('./src/sorter');
-    const result = await startSort({ sourceFolder, targetFolder }, sendLog, onAmbiguous, signal);
+    const result = await startSort({ sourceFolder, targetFolder }, sendLog, onAmbiguous, signal, waitIfSortPaused);
     if (!mainWindow.isDestroyed()) mainWindow.webContents.send('sort:complete', result);
   } catch (err) {
     sendLog(`Fatal error: ${err.message}`, 'error');
     if (!mainWindow.isDestroyed()) mainWindow.webContents.send('sort:complete', { moved: 0, skipped: 0, manual: 0 });
   } finally {
+    clearSortPause();
     sortAbortController      = null;
     pendingSortChoiceResolve = null;
+  }
+});
+
+ipcMain.handle('sort:pause', () => {
+  if (sortAbortController && !sortPausePromise) {
+    sortPausePromise = new Promise((resolve) => { sortPauseResolve = resolve; });
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sort:log', { msg: 'Pausing after current file…', type: 'warn' });
+    }
+  }
+});
+
+ipcMain.handle('sort:resume', () => {
+  if (sortPauseResolve) {
+    clearSortPause();
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sort:log', { msg: 'Resumed.', type: 'info' });
+    }
   }
 });
 
@@ -224,6 +264,7 @@ ipcMain.handle('sort:cancel', () => {
     pendingSortChoiceResolve = null;
     resolve(null);
   }
+  clearSortPause();
   sortAbortController?.abort();
 });
 

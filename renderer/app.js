@@ -26,6 +26,7 @@ let pendingResized   = [];   // [{ original, tmp, pagesResized, totalPages }]
 let sortSourceFolder = null;
 let sortTargetFolder = null;
 let isSorting        = false;
+let isSortPaused     = false;
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 // Tabs
@@ -60,6 +61,8 @@ const browseSortSourceBtn = document.getElementById('browseSortSourceBtn');
 const sortTargetPathEl    = document.getElementById('sortTargetPath');
 const browseSortTargetBtn = document.getElementById('browseSortTargetBtn');
 const sortBtn             = document.getElementById('sortBtn');
+const pauseSortBtn        = document.getElementById('pauseSortBtn');
+const cancelSortBtn       = document.getElementById('cancelSortBtn');
 
 // Shared
 const logContainer    = document.getElementById('logContainer');
@@ -538,7 +541,11 @@ sortBtn.addEventListener('click', async () => {
   if (!sortSourceFolder || !sortTargetFolder || isSorting) return;
 
   isSorting = true;
+  isSortPaused = false;
   sortBtn.disabled = true;
+  pauseSortBtn.disabled = false;
+  pauseSortBtn.textContent = '⏸  Pause';
+  cancelSortBtn.disabled = false;
   browseSortSourceBtn.disabled = true;
   browseSortTargetBtn.disabled = true;
   setTabsDisabled(true);
@@ -553,6 +560,22 @@ sortBtn.addEventListener('click', async () => {
   // Result arrives via 'sort:complete'
 });
 
+pauseSortBtn.addEventListener('click', () => {
+  if (!isSortPaused) {
+    isSortPaused = true;
+    pauseSortBtn.textContent = '▶  Resume';
+    electron.invoke('sort:pause');
+  } else {
+    isSortPaused = false;
+    pauseSortBtn.textContent = '⏸  Pause';
+    electron.invoke('sort:resume');
+  }
+});
+
+cancelSortBtn.addEventListener('click', () => {
+  electron.invoke('sort:cancel');
+});
+
 electron.on('sort:log', ({ msg, type }) => {
   appendLog(msg, type);
 });
@@ -563,6 +586,10 @@ electron.on('sort:ambiguous', ({ file, matches }) => {
 
 electron.on('sort:complete', ({ moved, skipped, manual, totalMovedBytes }) => {
   isSorting = false;
+  isSortPaused = false;
+  pauseSortBtn.disabled = true;
+  pauseSortBtn.textContent = '⏸  Pause';
+  cancelSortBtn.disabled = true;
   browseSortSourceBtn.disabled = false;
   browseSortTargetBtn.disabled = false;
   setTabsDisabled(false);
