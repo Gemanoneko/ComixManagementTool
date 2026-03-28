@@ -21,6 +21,7 @@ let sortStart        = 0;
 
 let resizeFolder     = null;
 let isResizing       = false;
+let isResizePaused   = false;
 let pendingResized   = [];   // [{ original, tmp, pagesResized, totalPages }]
 
 let sortSourceFolder = null;
@@ -50,6 +51,7 @@ const etaLabel         = document.getElementById('etaLabel');
 const resizeFolderPathEl  = document.getElementById('resizeFolderPath');
 const browseResizeBtn     = document.getElementById('browseResizeBtn');
 const startResizeBtn      = document.getElementById('startResizeBtn');
+const pauseResizeBtn      = document.getElementById('pauseResizeBtn');
 const cancelResizeBtn     = document.getElementById('cancelResizeBtn');
 const resizeProgressWrap  = document.getElementById('resizeProgressWrap');
 const resizeProgressFill  = document.getElementById('resizeProgressFill');
@@ -399,7 +401,10 @@ startResizeBtn.addEventListener('click', async () => {
   if (!resizeFolder || isResizing) return;
 
   isResizing = true;
+  isResizePaused = false;
   startResizeBtn.disabled = true;
+  pauseResizeBtn.disabled = false;
+  pauseResizeBtn.textContent = '⏸  Pause';
   cancelResizeBtn.disabled = false;
   browseResizeBtn.disabled = true;
   setTabsDisabled(true);
@@ -411,6 +416,18 @@ startResizeBtn.addEventListener('click', async () => {
 
   await electron.invoke('resize:start', { folder: resizeFolder });
   // Result arrives via 'resize:complete'
+});
+
+pauseResizeBtn.addEventListener('click', () => {
+  if (!isResizePaused) {
+    isResizePaused = true;
+    pauseResizeBtn.textContent = '▶  Resume';
+    electron.invoke('resize:pause');
+  } else {
+    isResizePaused = false;
+    pauseResizeBtn.textContent = '⏸  Pause';
+    electron.invoke('resize:resume');
+  }
 });
 
 cancelResizeBtn.addEventListener('click', () => {
@@ -427,7 +444,10 @@ electron.on('resize:progress', ({ current, total }) => {
 
 electron.on('resize:complete', (result) => {
   isResizing = false;
+  isResizePaused = false;
   startResizeBtn.disabled = !resizeFolder;
+  pauseResizeBtn.disabled = true;
+  pauseResizeBtn.textContent = '⏸  Pause';
   cancelResizeBtn.disabled = true;
   browseResizeBtn.disabled = false;
   setTabsDisabled(false);

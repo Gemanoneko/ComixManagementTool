@@ -169,7 +169,7 @@ async function getDimensions(filePath) {
  * @param {AbortSignal} signal
  * @returns {Promise<{ resized: Array, skipped: number, errors: Array, totalSavedBytes: number }>}
  */
-async function startResize({ folder }, sendLog, sendProgress, signal) {
+async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaused) {
   const sevenZip    = getSevenZip();
   const imageMagick = getImageMagick();
   if (!sevenZip)    throw new Error('7-Zip not found — cannot resize CBZs');
@@ -200,6 +200,12 @@ async function startResize({ folder }, sendLog, sendProgress, signal) {
   async function processOne() {
     while (true) {
       if (signal?.aborted) return;
+      if (waitIfPaused) {
+        try { await waitIfPaused(signal); } catch (err) {
+          if (err.name === 'AbortError' || signal?.aborted) return;
+          throw err;
+        }
+      }
       const i = nextIdx++;
       if (i >= cbzFiles.length) return;
 

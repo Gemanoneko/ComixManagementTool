@@ -86,6 +86,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   clearPause();
   clearSortPause();
+  clearResizePause();
   activeAbortController?.abort();
   sortAbortController?.abort();
   resizeAbortController?.abort();
@@ -275,6 +276,26 @@ ipcMain.handle('shell:openFolder', (event, filePath) => {
 
 // ── Resize CBZs ───────────────────────────────────────────────────────────────
 let resizeAbortController = null;
+let resizePausePromise    = null;
+let resizePauseResolve    = null;
+
+function waitIfResizePaused(signal) {
+  if (!resizePausePromise) return Promise.resolve();
+  return Promise.race([
+    resizePausePromise,
+    new Promise((_, reject) => {
+      const onAbort = () => reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener('abort', onAbort, { once: true });
+    }),
+  ]);
+}
+
+function clearResizePause() {
+  if (resizePauseResolve) resizePauseResolve();
+  resizePauseResolve = null;
+  resizePausePromise = null;
+}
 
 ipcMain.handle('resize:start', async (event, { folder }) => {
   resizeAbortController = new AbortController();
@@ -297,7 +318,8 @@ ipcMain.handle('resize:start', async (event, { folder }) => {
       { folder },
       sendLog,
       sendProgress,
-      resizeAbortController.signal
+      resizeAbortController.signal,
+      waitIfResizePaused
     );
     if (!mainWindow.isDestroyed()) {
       mainWindow.webContents.send('resize:complete', result);
@@ -310,14 +332,32 @@ ipcMain.handle('resize:start', async (event, { folder }) => {
       mainWindow.webContents.send('resize:complete', { resized: [], skipped: 0, errors: [], aborted: true });
     }
   } finally {
+    clearResizePause();
     resizeAbortController = null;
   }
 });
 
-ipcMain.handle('resize:cancel', () => {
-  if (resizeAbortController) {
-    resizeAbortController.abort();
+ipcMain.handle('resize:pause', () => {
+  if (resizeAbortController && !resizePausePromise) {
+    resizePausePromise = new Promise((resolve) => { resizePauseResolve = resolve; });
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('resize:log', { msg: 'Pausing after current file…', type: 'warn' });
+    }
   }
+});
+
+ipcMain.handle('resize:resume', () => {
+  if (resizePauseResolve) {
+    clearResizePause();
+    if (!mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('resize:log', { msg: 'Resumed.', type: 'info' });
+    }
+  }
+});
+
+ipcMain.handle('resize:cancel', () => {
+  clearResizePause();
+  resizeAbortController?.abort();
 });
 
 // Replace each original CBZ with its resized temp copy
