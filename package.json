@@ -1,12 +1,12 @@
 {
   "name": "comix-management-tool",
-  "version": "1.2.9",
+  "version": "1.6.2",
   "description": "Comic archive conversion and management tool",
   "main": "main.js",
   "scripts": {
     "start":           "electron .",
     "prepare-vendor":  "node scripts/prepare-vendor.js",
-    "dist":            "electron-builder --win"
+    "dist":            "electron-builder --win && node scripts/stamp-icon.js"
   },
   "dependencies": {},
   "devDependencies": {
@@ -38,6 +38,7 @@
       }
     ],
     "win": {
+      "icon": "assets/icon.ico",
       "target": [
         { "target": "dir", "arch": ["x64"] }
       ]

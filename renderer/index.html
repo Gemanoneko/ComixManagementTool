@@ -23,11 +23,15 @@
       <!-- Tab bar -->
       <div class="tab-bar" id="tabBar">
         <button class="tab-btn active" data-tab="convert"
-                title="Convert comic archives (.cbr, .rar, .zip, .pdf) to .cbz format">Convert</button>
+                title="Convert .cbr, .rar, .zip, and .pdf archives to .cbz format">Convert</button>
         <button class="tab-btn" data-tab="resize"
-                title="Shrink oversized pages in existing .cbz files (pages larger than 4 500 px on the longest side)">Resize CBZs</button>
+                title="Shrink pages larger than 4 500 px in existing .cbz files">Resize CBZs</button>
         <button class="tab-btn" data-tab="sort"
-                title="Move unsorted comic files into the correct subfolder of your organized collection">Sort Comics</button>
+                title="Move unsorted .cbz files into matching subfolders of your library">Sort Comics</button>
+        <button class="tab-btn" data-tab="duplicates"
+                title="Find exact copies, same-name, and similar-name duplicates in a folder">Find Duplicates</button>
+        <button class="tab-btn" data-tab="fix"
+                title="Flatten redundant single-subfolder nesting and delete empty folders">Fix the Library</button>
       </div>
 
       <!-- ── Tab: Convert ──────────────────────────────────────────────────── -->
@@ -38,6 +42,10 @@
 
           <div class="preset-row">
             <span class="preset-label">Presets:</span>
+            <button class="preset-btn" data-path="Y:\Books"
+                    title="Jump to Y:\Books">Books</button>
+            <button class="preset-btn" data-path="Y:\Books\Artbooks"
+                    title="Jump to Y:\Books\Artbooks">Artbooks</button>
             <button class="preset-btn" data-path="Y:\Comix"
                     title="Jump to Y:\Comix">Comix</button>
             <button class="preset-btn" data-path="Y:\Ecchi"
@@ -50,21 +58,21 @@
                     title="Jump to Y:\Manga">Manga</button>
             <button class="preset-btn" data-path="Y:\Sexy Comics"
                     title="Jump to Y:\Sexy Comics">Sexy Comics</button>
-            <button class="preset-btn" data-path="Y:\Books\Artbooks"
-                    title="Jump to Y:\Books\Artbooks">Artbooks</button>
+            <button class="preset-btn" data-path="I:\Unsorted Comics"
+                    title="Jump to I:\Unsorted Comics">Unsorted Comics</button>
           </div>
 
           <div class="folder-row">
             <input id="folderPath" type="text" class="folder-input"
                    placeholder="Select a folder or drag and drop one here…" readonly
-                   title="The folder to scan for comic archives" />
+                   title="Root folder to scan recursively for .cbr, .rar, .zip, and .pdf archives" />
             <button id="browseBtn" class="btn btn-secondary"
                     title="Open a folder picker to choose the source folder">Browse…</button>
           </div>
 
           <div class="options-row">
             <label class="toggle-wrap"
-                   title="Comics naming: Series Name - Volume X - #Issue&#10;Manga naming: Series Title - Vol XX - Ch YYY">
+                   title="Comics: Series Name - Volume X - #Issue&#10;Manga:  Series Title - Vol XX - Ch YYY">
               <input id="mangaMode" type="checkbox" />
               <span class="toggle-track"></span>
               <span class="toggle-text">Manga Mode</span>
@@ -77,9 +85,9 @@
           <button id="startBtn" class="btn btn-primary" disabled
                   title="Start converting all archives in the selected folder to .cbz">▶  Start Conversion</button>
           <button id="pauseBtn" class="btn btn-secondary" disabled
-                  title="Pause conversion after the current file finishes; click again to resume">⏸  Pause</button>
+                  title="Pause after the current file finishes — click again to resume">⏸  Pause</button>
           <button id="cancelBtn" class="btn btn-danger" disabled
-                  title="Abort the conversion immediately">✕  Cancel</button>
+                  title="Abort the conversion">✕  Cancel</button>
           <div id="progressWrap" class="progress-wrap hidden">
             <div class="progress-track">
               <div id="progressFill" class="progress-fill"></div>
@@ -96,10 +104,21 @@
 
         <section class="panel">
           <div class="panel-title">CBZ Folder</div>
+          <div class="preset-row">
+            <span class="preset-label">Presets:</span>
+            <button class="tab-preset-btn" data-target="resizeFolderPath" data-path="Y:\Books"         title="Jump to Y:\Books">Books</button>
+            <button class="tab-preset-btn" data-target="resizeFolderPath" data-path="Y:\Books\Artbooks" title="Jump to Y:\Books\Artbooks">Artbooks</button>
+            <button class="tab-preset-btn" data-target="resizeFolderPath" data-path="Y:\Comix"          title="Jump to Y:\Comix">Comix</button>
+            <button class="tab-preset-btn" data-target="resizeFolderPath" data-path="Y:\Ecchi"          title="Jump to Y:\Ecchi">Ecchi</button>
+            <button class="tab-preset-btn" data-target="resizeFolderPath" data-path="Y:\Ecchi Pictures" title="Jump to Y:\Ecchi Pictures">Ecchi Pictures</button>
+            <button class="tab-preset-btn" data-target="resizeFolderPath" data-path="Y:\Magazines"      title="Jump to Y:\Magazines">Magazines</button>
+            <button class="tab-preset-btn" data-target="resizeFolderPath" data-path="Y:\Manga"          title="Jump to Y:\Manga">Manga</button>
+            <button class="tab-preset-btn" data-target="resizeFolderPath" data-path="Y:\Sexy Comics"    title="Jump to Y:\Sexy Comics">Sexy Comics</button>
+          </div>
           <div class="folder-row">
             <input id="resizeFolderPath" type="text" class="folder-input"
                    placeholder="Select folder containing CBZ files…" readonly
-                   title="Root folder to scan for .cbz files (all subfolders are included)" />
+                   title="Root folder to scan recursively for .cbz files" />
             <button id="browseResizeBtn" class="btn btn-secondary"
                     title="Open a folder picker to choose the CBZ folder">Browse…</button>
           </div>
@@ -112,11 +131,11 @@
 
         <div class="action-bar">
           <button id="startResizeBtn" class="btn btn-resize" disabled
-                  title="Scan CBZ files and resize pages larger than 4 500 px (longest side) to fit within 4 500 × 4 500 at quality 90">⬡  Resize CBZs</button>
+                  title="Scan CBZ files and preview pages that exceed 4 500 px — you confirm before anything is overwritten">⬡  Resize CBZs</button>
           <button id="pauseResizeBtn" class="btn btn-secondary" disabled
-                  title="Pause after the current file finishes; click again to resume">⏸  Pause</button>
+                  title="Pause after the current file finishes — click again to resume">⏸  Pause</button>
           <button id="cancelResizeBtn" class="btn btn-danger" disabled
-                  title="Abort the resize operation">✕  Cancel</button>
+                  title="Abort the resize scan">✕  Cancel</button>
           <div id="resizeProgressWrap" class="progress-wrap hidden">
             <div class="progress-track">
               <div id="resizeProgressFill" class="progress-fill"></div>
@@ -137,7 +156,7 @@
           <div class="folder-row">
             <input id="sortSourcePath" type="text" class="folder-input"
                    placeholder="Select source folder (unsorted comix)…" readonly
-                   title="The folder containing unsorted comic files to be moved" />
+                   title="Folder containing unsorted .cbz files to be moved" />
             <button id="browseSortSourceBtn" class="btn btn-secondary"
                     title="Browse for the folder containing unsorted comic files">Browse…</button>
           </div>
@@ -146,7 +165,7 @@
           <div class="folder-row">
             <input id="sortTargetPath" type="text" class="folder-input"
                    placeholder="Select target folder (e.g. Y:\Comix)…" readonly
-                   title="The root of your organized collection — files will be moved into matching subfolders here" />
+                   title="Root of your organized collection — files are moved into matching first-level subfolders here" />
             <button id="browseSortTargetBtn" class="btn btn-secondary"
                     title="Browse for the root of your sorted collection">Browse…</button>
           </div>
@@ -154,21 +173,220 @@
 
         <div class="action-bar">
           <button id="sortBtn" class="btn btn-sort" disabled
-                  title="Move unsorted files from the source folder into the matching first-level subfolder of the target collection">⇄  Sort Comics</button>
+                  title="Move each file from the source into the matching first-level subfolder of the target">⇄  Sort Comics</button>
           <button id="pauseSortBtn" class="btn btn-secondary" disabled
-                  title="Pause after the current file finishes; click again to resume">⏸  Pause</button>
+                  title="Pause after the current file finishes — click again to resume">⏸  Pause</button>
           <button id="cancelSortBtn" class="btn btn-danger" disabled
-                  title="Abort the sort immediately">✕  Cancel</button>
+                  title="Abort the sort">✕  Cancel</button>
         </div>
 
       </div><!-- /tab-sort -->
 
+      <!-- ── Tab: Find Duplicates ─────────────────────────────────────────── -->
+      <div class="tab-pane hidden" id="tab-duplicates">
+
+        <section class="panel">
+          <div class="panel-title">Search Folder</div>
+          <div class="preset-row">
+            <span class="preset-label">Presets:</span>
+            <button class="tab-preset-btn" data-target="dupFolderPath" data-path="Y:\Books"         title="Jump to Y:\Books">Books</button>
+            <button class="tab-preset-btn" data-target="dupFolderPath" data-path="Y:\Books\Artbooks" title="Jump to Y:\Books\Artbooks">Artbooks</button>
+            <button class="tab-preset-btn" data-target="dupFolderPath" data-path="Y:\Comix"          title="Jump to Y:\Comix">Comix</button>
+            <button class="tab-preset-btn" data-target="dupFolderPath" data-path="Y:\Ecchi"          title="Jump to Y:\Ecchi">Ecchi</button>
+            <button class="tab-preset-btn" data-target="dupFolderPath" data-path="Y:\Ecchi Pictures" title="Jump to Y:\Ecchi Pictures">Ecchi Pictures</button>
+            <button class="tab-preset-btn" data-target="dupFolderPath" data-path="Y:\Magazines"      title="Jump to Y:\Magazines">Magazines</button>
+            <button class="tab-preset-btn" data-target="dupFolderPath" data-path="Y:\Manga"          title="Jump to Y:\Manga">Manga</button>
+            <button class="tab-preset-btn" data-target="dupFolderPath" data-path="Y:\Sexy Comics"    title="Jump to Y:\Sexy Comics">Sexy Comics</button>
+          </div>
+          <div class="folder-row">
+            <input id="dupFolderPath" type="text" class="folder-input"
+                   placeholder="Select folder to scan for duplicate comics…" readonly
+                   title="Root folder to scan recursively for duplicate .cbz files" />
+            <button id="browseDupBtn" class="btn btn-secondary"
+                    title="Open a folder picker to choose the folder to scan">Browse…</button>
+          </div>
+          <p class="panel-hint">
+            Finds <strong>exact copies</strong> (identical content), files with the
+            <strong>same filename</strong> in different folders, and files with
+            <strong>similar names</strong> (e.g. "The X" vs "X"). At least one file per
+            group is always kept — checked files are moved to the <strong>Recycle Bin</strong>.
+          </p>
+        </section>
+
+        <div class="action-bar">
+          <button id="startDupBtn" class="btn btn-dup" disabled
+                  title="Scan the selected folder recursively for duplicate comic files">⊕  Find Duplicates</button>
+          <button id="cancelDupBtn" class="btn btn-danger" disabled
+                  title="Cancel the running duplicate scan">✕  Cancel</button>
+          <div id="dupProgressWrap" class="progress-wrap hidden">
+            <div class="progress-track">
+              <div id="dupProgressFill" class="progress-fill"></div>
+            </div>
+            <span id="dupProgressLabel" class="progress-label"></span>
+          </div>
+        </div>
+
+        <section class="panel dup-results-panel hidden" id="dupResultsPanel">
+          <div class="dup-results-toolbar">
+            <span class="panel-title" id="dupSummary">Results</span>
+            <button id="invertDupSelBtn" class="btn btn-secondary" disabled
+                    title="Invert checkboxes — swap which file is marked for deletion in every group">⇄  Invert Selection</button>
+            <button id="trashCheckedBtn" class="btn btn-danger" disabled
+                    title="Send all checked files to the Recycle Bin — unchecked files in each group are kept">🗑  Trash Checked</button>
+          </div>
+          <div id="dupResultsList" class="dup-results-list"></div>
+        </section>
+
+      </div><!-- /tab-duplicates -->
+
+      <!-- ── Tab: Fix the Library ────────────────────────────────────────────── -->
+      <div class="tab-pane hidden" id="tab-fix">
+
+        <section class="panel">
+          <div class="panel-title">Library Folder</div>
+          <div class="preset-row">
+            <span class="preset-label">Presets:</span>
+            <button class="tab-preset-btn" data-target="fixFolderPath" data-path="Y:\Books"         title="Jump to Y:\Books">Books</button>
+            <button class="tab-preset-btn" data-target="fixFolderPath" data-path="Y:\Books\Artbooks" title="Jump to Y:\Books\Artbooks">Artbooks</button>
+            <button class="tab-preset-btn" data-target="fixFolderPath" data-path="Y:\Comix"          title="Jump to Y:\Comix">Comix</button>
+            <button class="tab-preset-btn" data-target="fixFolderPath" data-path="Y:\Ecchi"          title="Jump to Y:\Ecchi">Ecchi</button>
+            <button class="tab-preset-btn" data-target="fixFolderPath" data-path="Y:\Ecchi Pictures" title="Jump to Y:\Ecchi Pictures">Ecchi Pictures</button>
+            <button class="tab-preset-btn" data-target="fixFolderPath" data-path="Y:\Magazines"      title="Jump to Y:\Magazines">Magazines</button>
+            <button class="tab-preset-btn" data-target="fixFolderPath" data-path="Y:\Manga"          title="Jump to Y:\Manga">Manga</button>
+            <button class="tab-preset-btn" data-target="fixFolderPath" data-path="Y:\Sexy Comics"    title="Jump to Y:\Sexy Comics">Sexy Comics</button>
+          </div>
+          <div class="folder-row">
+            <input id="fixFolderPath" type="text" class="folder-input"
+                   placeholder="Select folder to scan for nesting issues…" readonly
+                   title="Root folder to scan recursively for nesting issues and empty folders" />
+            <button id="browseFixBtn" class="btn btn-secondary"
+                    title="Open a folder picker to choose the library folder">Browse…</button>
+          </div>
+          <p class="panel-hint">
+            Finds folders that contain <strong>exactly one subfolder and no .cbz files</strong>
+            and proposes to flatten them — moving the subfolder's contents up one level and
+            removing the now-empty subfolder.<br>
+            Chains are handled automatically (A → B → C collapses to A → contents).<br>
+            Stale <code>_organise_undo.json</code> and <code>_consolidate_undo.json</code> files are deleted during the scan.<br>
+            Review the list below before applying.
+          </p>
+        </section>
+
+        <div class="action-bar">
+          <button id="scanFixBtn" class="btn btn-fix" disabled
+                  title="Scan for folders with exactly one subfolder and no files — shows a preview before anything is moved">⊕  Scan Folders</button>
+          <button id="scanBundlesBtn" class="btn btn-fix" disabled
+                  title="Find CBZ files that contain other archives inside (bundle packs) — shows a preview before extracting">⊕  Scan Bundles</button>
+          <button id="scanExtFoldersBtn" class="btn btn-fix" disabled
+                  title="Find folders whose names have archive extensions (.cbr, .cbz, .rar, .zip) — convert image-only folders to CBZ, rename folders that contain archives">⊕  Scan Ext-Folders</button>
+          <button id="deleteEmptyBtn" class="btn btn-fix" disabled
+                  title="Scan recursively and delete every folder that contains no files or subfolders">⊗  Delete Empty Folders</button>
+          <button id="cancelFixBtn" class="btn btn-danger" disabled
+                  title="Cancel the running scan or operation">✕  Cancel</button>
+          <div id="fixProgressWrap" class="progress-wrap hidden">
+            <div class="progress-track">
+              <div id="fixProgressFill" class="progress-fill"></div>
+            </div>
+            <span id="fixProgressLabel" class="progress-label"></span>
+            <span id="fixEtaLabel" class="eta-label"></span>
+          </div>
+        </div>
+
+        <!-- Flatten preview panel -->
+        <section class="panel fix-preview-panel hidden" id="fixPreviewPanel">
+          <div class="fix-preview-toolbar">
+            <span class="panel-title" id="fixPreviewSummary">Preview</span>
+            <div class="fix-preview-actions">
+              <label class="fix-select-all-wrap">
+                <input type="checkbox" id="fixSelectAll" checked
+                       title="Check or uncheck all folders in the list" />
+                <span>Select all</span>
+              </label>
+              <button id="applyFixBtn" class="btn btn-fix-apply" disabled
+                      title="Move contents of each checked subfolder up into its parent, then remove the now-empty subfolder">✓  Flatten Checked</button>
+            </div>
+          </div>
+          <div id="fixGroupList" class="fix-group-list"></div>
+        </section>
+
+        <!-- Bundle unwrap preview panel -->
+        <section class="panel fix-preview-panel hidden" id="bundlePreviewPanel">
+          <div class="fix-preview-toolbar">
+            <span class="panel-title" id="bundlePreviewSummary">Bundle Preview</span>
+            <div class="fix-preview-actions">
+              <label class="fix-select-all-wrap">
+                <input type="checkbox" id="bundleSelectAll" checked
+                       title="Check or uncheck all bundles in the list" />
+                <span>Select all</span>
+              </label>
+              <button id="applyUnwrapBtn" class="btn btn-fix-apply" disabled
+                      title="Extract each checked bundle CBZ into its own folder">✓  Unwrap Checked</button>
+            </div>
+          </div>
+          <div id="bundleGroupList" class="fix-group-list"></div>
+        </section>
+
+        <!-- Deletion panel — shown after unwrap completes -->
+        <section class="panel fix-preview-panel hidden" id="bundleDeletionPanel">
+          <div class="fix-preview-toolbar">
+            <span class="panel-title" id="bundleDeletionSummary">Original Files</span>
+            <div class="fix-preview-actions">
+              <button id="deleteAllOriginalsBtn" class="btn btn-danger"
+                      title="Send all listed original bundle CBZs to the Recycle Bin">⊗  Delete All Originals</button>
+            </div>
+          </div>
+          <div id="bundleDeletionList" class="bundle-deletion-list"></div>
+        </section>
+
+        <!-- Ext-Folders: Convert preview panel (Category A) -->
+        <section class="panel fix-preview-panel hidden" id="extConvertPanel">
+          <div class="fix-preview-toolbar">
+            <span class="panel-title" id="extConvertSummary">Convert to CBZ</span>
+            <div class="fix-preview-actions">
+              <label class="fix-select-all-wrap">
+                <input type="checkbox" id="extConvertSelectAll" checked
+                       title="Check or uncheck all folders in the list" />
+                <span>Select all</span>
+              </label>
+              <button id="applyExtConvertBtn" class="btn btn-fix-apply" disabled
+                      title="Pack each checked folder's images into a CBZ file">✓  Convert Checked</button>
+            </div>
+          </div>
+          <div id="extConvertList" class="fix-group-list"></div>
+        </section>
+
+        <!-- Ext-Folders: Rename panel (Category B) -->
+        <section class="panel fix-preview-panel hidden" id="extRenamePanel">
+          <div class="fix-preview-toolbar">
+            <span class="panel-title" id="extRenameSummary">Rename Folders</span>
+            <div class="fix-preview-actions">
+              <button id="applyExtRenameBtn" class="btn btn-fix-apply" disabled
+                      title="Strip the archive extension from all listed folders immediately">↩  Rename All</button>
+            </div>
+          </div>
+          <div id="extRenameList" class="fix-group-list"></div>
+        </section>
+
+        <!-- Ext-Folders: Deletion panel — shown after convert completes -->
+        <section class="panel fix-preview-panel hidden" id="extDeletionPanel">
+          <div class="fix-preview-toolbar">
+            <span class="panel-title" id="extDeletionSummary">Converted Folders</span>
+            <div class="fix-preview-actions">
+              <button id="deleteAllExtFoldersBtn" class="btn btn-danger"
+                      title="Send all converted source folders to the Recycle Bin">⊗  Delete All Source Folders</button>
+            </div>
+          </div>
+          <div id="extDeletionList" class="bundle-deletion-list"></div>
+        </section>
+
+      </div><!-- /tab-fix -->
+
       <!-- Shared log panel -->
-      <section class="panel log-panel">
+      <section class="panel log-panel" id="logPanel">
         <div class="log-toolbar">
           <span class="panel-title">Log</span>
           <button id="clearLogBtn" class="btn btn-ghost"
-                  title="Clear all log output">Clear</button>
+                  title="Clear the log">Clear</button>
         </div>
         <div id="logContainer" class="log-container">
           <span class="log-placeholder">Output will appear here…</span>
@@ -187,7 +405,7 @@
       <div id="sortModalOptions" class="sort-modal-options"></div>
       <div class="modal-actions">
         <button id="sortModalSkipBtn" class="btn btn-secondary"
-                title="Skip this file — leave it unsorted">Skip this file</button>
+                title="Leave this file in the source folder and continue sorting">Skip this file</button>
       </div>
     </div>
   </div>
@@ -222,9 +440,9 @@
       <div id="resizeList" class="delete-list"></div>
       <div class="modal-actions">
         <button id="discardResizeBtn" class="btn btn-secondary"
-                title="Discard the resized copies — originals remain unchanged">Discard</button>
+                title="Delete the resized copies — originals remain unchanged">Discard</button>
         <button id="confirmResizeBtn" class="btn btn-primary"
-                title="Replace each original CBZ with its resized version">Replace All</button>
+                title="Overwrite each original CBZ with its resized version">Replace All</button>
       </div>
     </div>
   </div>
@@ -254,19 +472,25 @@
 
       <p id="reviewStatus" class="review-status hidden"></p>
 
-      <div class="modal-actions">
-        <button id="reviewKeepAllBtn"    class="btn btn-secondary"
-                title="Keep all remaining review files — none will be deleted">Keep All Remaining</button>
-        <button id="reviewDeleteAllBtn"  class="btn btn-danger"
-                title="Delete all remaining review files permanently">Delete All Remaining</button>
-        <button id="reviewOpenFolderBtn" class="btn btn-secondary"
-                title="Open this file's containing folder in Explorer">Open Folder</button>
-        <button id="reviewConvertBtn"    class="btn btn-convert"
-                title="Convert this file to .cbz now, then delete the original">Convert</button>
-        <button id="reviewKeepBtn"       class="btn btn-secondary"
-                title="Keep this file and move to the next one">Keep</button>
-        <button id="reviewDeleteBtn"     class="btn btn-danger"
-                title="Delete this original file permanently">Delete</button>
+      <div class="modal-actions review-modal-actions">
+        <!-- Bulk actions (apply to all remaining files) -->
+        <div class="review-bulk-actions">
+          <button id="reviewKeepAllBtn"   class="btn btn-secondary"
+                  title="Keep this and all remaining files — close the review dialog">Keep All Remaining</button>
+          <button id="reviewDeleteAllBtn" class="btn btn-danger"
+                  title="Permanently delete this and all remaining review files">Delete All Remaining</button>
+        </div>
+        <!-- Per-file actions -->
+        <div class="review-file-actions">
+          <button id="reviewOpenFolderBtn" class="btn btn-secondary"
+                  title="Open the folder containing this file in Explorer">Open Folder</button>
+          <button id="reviewConvertBtn"    class="btn btn-convert"
+                  title="Convert this file to .cbz now, then permanently delete the original">Convert</button>
+          <button id="reviewKeepBtn"       class="btn btn-secondary"
+                  title="Keep this file and move to the next review item">Keep</button>
+          <button id="reviewDeleteBtn"     class="btn btn-danger"
+                  title="Permanently delete this file and move to the next review item">Delete</button>
+        </div>
       </div>
     </div>
   </div>

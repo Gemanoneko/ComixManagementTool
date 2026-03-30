@@ -122,6 +122,21 @@ body {
 .preset-btn:hover  { border-color: var(--accent); color: var(--accent); }
 .preset-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 
+/* Preset buttons used on non-Convert tabs (same visual style, no active state) */
+.tab-preset-btn {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 11px;
+  font-size: .78rem;
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.tab-preset-btn:hover         { border-color: var(--accent); color: var(--accent); }
+.tab-preset-btn.active        { background: var(--accent); border-color: var(--accent); color: #fff; }
+.tab-preset-btn:disabled      { opacity: .4; cursor: not-allowed; }
+
 .folder-row {
   display: flex;
   gap: 8px;
@@ -290,6 +305,20 @@ body {
 .log-skip    { color: var(--skip); }
 .log-header  { color: var(--header-fg); font-weight: bold; }
 
+.log-open-btn {
+  display: inline-block;
+  padding: 0 6px;
+  font-size: .7rem;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  vertical-align: middle;
+}
+.log-open-btn:hover { background: var(--hover); color: var(--text); }
+
 /* ── Buttons ─────────────────────────────────────────────────────────────── */
 .btn {
   display: inline-flex;
@@ -376,6 +405,22 @@ body {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
+}
+
+/* ── Needs-review modal actions layout ──────────────────────────────────── */
+/* Override the shared .modal-actions (flex-end) for the review modal which  */
+/* has two button groups: bulk-actions on the left, per-file on the right.   */
+.review-modal-actions {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.review-bulk-actions,
+.review-file-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 /* ── Needs-review modal ─────────────────────────────────────────────────── */
@@ -592,9 +637,360 @@ body {
   background: #1a2a3a;
 }
 
+/* ── Find Duplicates tab ─────────────────────────────────────────────────── */
+.btn-dup {
+  background: #3a1e5a;
+  color: #c082ff;
+  border: 1px solid #5a2e8a;
+}
+.btn-dup:not(:disabled):hover { opacity: .85; }
+
+.dup-results-panel {
+  /* max-height keeps the log panel visible below */
+  flex-shrink: 0;
+}
+
+.dup-results-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.dup-results-list {
+  overflow-y: auto;
+  max-height: 600px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dup-no-results {
+  color: var(--text-muted);
+  font-size: .85rem;
+  font-style: italic;
+  padding: 8px 0;
+}
+
+/* Group card */
+.dup-group {
+  flex-shrink: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.dup-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  cursor: pointer;
+  background: var(--surface2);
+  user-select: none;
+}
+.dup-group-header:hover {
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface2));
+}
+
+.dup-badge {
+  font-size: .63rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.dup-badge-exact    { background: #8b1a1a; color: #ffbbbb; }
+.dup-badge-samename { background: #1e4d7a; color: #82caff; }
+.dup-badge-similar  { background: #3a3518; color: #f0e060; }
+
+.dup-group-info {
+  flex: 1;
+  font-size: .8rem;
+  color: var(--text-muted);
+}
+
+.dup-group-chevron {
+  color: var(--text-muted);
+  font-size: .75rem;
+  flex-shrink: 0;
+  transition: transform .15s;
+}
+.dup-group.collapsed .dup-group-files   { display: none; }
+.dup-group.collapsed .dup-group-chevron { transform: rotate(-90deg); }
+
+/* File rows */
+.dup-group-files { padding: 4px 0; }
+
+.dup-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.dup-file-row:last-child { border-bottom: none; }
+.dup-file-row:hover { background: color-mix(in srgb, var(--accent) 5%, var(--bg)); }
+.dup-file-row.trashed { opacity: .4; }
+
+.dup-file-check {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.dup-file-check:disabled { cursor: not-allowed; opacity: .4; }
+
+.dup-file-path {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: .74rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.dup-file-meta {
+  font-size: .7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.dup-file-open {
+  flex-shrink: 0;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 10px;
+  font-size: .7rem;
+  cursor: pointer;
+  font-family: var(--sans);
+  white-space: nowrap;
+}
+.dup-file-open:hover { color: var(--text); border-color: var(--text-muted); }
+
 /* ── Utilities ──────────────────────────────────────────────────────────── */
 .hidden { display: none !important; }
 
+/* ── Fix the Library tab ────────────────────────────────────────────────── */
+.btn-fix {
+  background: #3a2a1a;
+  color: #f0b866;
+  border: 1px solid #7a5a2a;
+}
+.btn-fix:not(:disabled):hover { opacity: .85; }
+
+.btn-fix-apply {
+  background: #3a2a1a;
+  color: #f0b866;
+  border: 1px solid #7a5a2a;
+  font-weight: 600;
+}
+.btn-fix-apply:not(:disabled):hover { opacity: .85; }
+
+.fix-preview-panel { margin-top: 8px; }
+
+.fix-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.fix-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fix-select-all-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: .82rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.fix-select-all-wrap input[type="checkbox"] { cursor: pointer; }
+
+.fix-group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.fix-group-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.fix-group-row:hover { background: var(--surface); }
+.fix-group-row > input[type="checkbox"] { cursor: pointer; flex-shrink: 0; }
+
+.fix-group-paths {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.fix-group-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fix-group-line-label {
+  font-size: .68rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  width: 36px;
+  text-align: right;
+}
+
+.fix-group-line-path {
+  font-family: var(--mono);
+  font-size: .74rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.fix-group-line-now  .fix-group-line-path { color: var(--text-muted); }
+.fix-group-line-after .fix-group-line-path { color: #78d878; }
+
+.fix-group-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.fix-row-open {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 9px;
+  font-size: .72rem;
+  cursor: pointer;
+  font-family: var(--sans);
+  white-space: nowrap;
+}
+.fix-row-open:hover { color: var(--text); border-color: var(--text-muted); }
+
+.fix-row-flatten {
+  background: #3a2a1a;
+  color: #f0b866;
+  border: 1px solid #7a5a2a;
+  border-radius: 3px;
+  padding: 3px 9px;
+  font-size: .72rem;
+  cursor: pointer;
+  font-family: var(--sans);
+  white-space: nowrap;
+}
+.fix-row-flatten:not(:disabled):hover { opacity: .85; }
+.fix-row-flatten:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ── Bundle deletion panel ───────────────────────────────────────────────── */
+.bundle-deletion-list { display: flex; flex-direction: column; gap: 6px; }
+
+.bundle-deletion-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-bg);
+  transition: opacity .3s;
+}
+.bundle-deletion-row.trashed { opacity: 0; }
+
+.bundle-deletion-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+.bundle-deletion-file {
+  font-size: .8rem;
+  color: var(--warn);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bundle-deletion-dest {
+  font-size: .78rem;
+  color: var(--success);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bundle-del-btn {
+  background: #3a1a1a;
+  color: #f08080;
+  border: 1px solid #7a2a2a;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: .75rem;
+  cursor: pointer;
+  font-family: var(--sans);
+  white-space: nowrap;
+}
+.bundle-del-btn:not(:disabled):hover { opacity: .85; }
+.bundle-del-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ── Ext-folder row elements ─────────────────────────────────────────────── */
+
+/* Used in ext-convert and ext-rename rows */
+.fix-group-info {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  overflow: hidden;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: .75rem;
+}
+.fix-group-from { color: var(--text-muted); }
+.fix-group-to   { color: #78d878; }
+.fix-group-meta { color: var(--text-dim); font-size: .7rem; }
+
+.fix-conflict-badge {
+  color: var(--warn);
+  font-size: .7rem;
+  font-family: var(--sans);
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--surface2); border-radius: 3px; }
