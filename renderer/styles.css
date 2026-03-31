@@ -714,6 +714,22 @@ body {
   color: var(--text-muted);
 }
 
+.dup-group-ignore {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: .72rem;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.dup-group-ignore:hover {
+  color: var(--text);
+  border-color: var(--text-muted);
+}
+
 .dup-group-chevron {
   color: var(--text-muted);
   font-size: .75rem;

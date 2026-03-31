@@ -142,6 +142,7 @@ const dupProgressLabel = document.getElementById('dupProgressLabel');
 const dupResultsPanel  = document.getElementById('dupResultsPanel');
 const dupSummary       = document.getElementById('dupSummary');
 const dupResultsList   = document.getElementById('dupResultsList');
+const uncheckAllDupBtn = document.getElementById('uncheckAllDupBtn');
 const invertDupSelBtn  = document.getElementById('invertDupSelBtn');
 const trashCheckedBtn  = document.getElementById('trashCheckedBtn');
 
@@ -164,6 +165,7 @@ const sortModalSkipBtn = document.getElementById('sortModalSkipBtn');
 // ── Default folder values ─────────────────────────────────────────────────────
 sortSourcePathEl.value = sortSourceFolder;
 sortTargetPathEl.value = sortTargetFolder;
+updateSortBtn();
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 tabBtns.forEach((btn) => {
@@ -600,7 +602,7 @@ electron.on('resize:complete', (result) => {
         `${pendingResized.length} file(s) finished before cancellation.`,
         'warn'
       );
-      showResizeModal(pendingResized, skipped, errors);
+      showResizeModal(pendingResized, errors);
     } else {
       appendLog(`Resize cancelled${resizeElapsed ? ` after ${resizeElapsed}` : ''}.`, 'warn');
     }
@@ -609,7 +611,7 @@ electron.on('resize:complete', (result) => {
 
   if (pendingResized.length > 0) {
     if (resizeElapsed) appendLog(`Scan complete — elapsed: ${resizeElapsed}`, 'info');
-    showResizeModal(pendingResized, skipped, errors);
+    showResizeModal(pendingResized, errors);
   } else {
     const msg = `Done — ${skipped} file(s) already within 4 500 px, ${errors.length} error(s).` +
                 (resizeElapsed ? `  Elapsed: ${resizeElapsed}.` : '');
@@ -617,7 +619,7 @@ electron.on('resize:complete', (result) => {
   }
 });
 
-function showResizeModal(resized, skipped, errors) {
+function showResizeModal(resized, errors) {
   resizeList.innerHTML = '';
 
   const totalSaved = resized.reduce((sum, r) => sum + Math.max(0, r.originalSize - r.newSize), 0);
@@ -999,6 +1001,7 @@ function renderDuplicates(groups) {
 
   dupGroups = toRender.map((g) => ({
     type: g.type,
+    ignored: false,
     files: g.files.map((f, i) => ({
       ...f,
       // Exact: pre-check all but the newest (keep newest by default).
@@ -1059,12 +1062,32 @@ function renderDuplicates(groups) {
     }
     info.textContent = infoText;
 
+    const ignoreBtn   = document.createElement('button');
+    ignoreBtn.className = 'dup-group-ignore';
+    ignoreBtn.textContent = 'Ignore';
+    ignoreBtn.title = 'Dismiss this group — no files will be deleted';
+    ignoreBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      dupGroups[gi].ignored = true;
+      // Uncheck all files so they don't contribute to the trash count
+      dupGroups[gi].files.forEach((f, fi) => {
+        f.checked = false;
+        const cb = document.querySelector(`.dup-file-check[data-gi="${gi}"][data-fi="${fi}"]`);
+        if (cb) cb.checked = false;
+      });
+      div.classList.add('hidden');
+      refreshDupSummary();
+      updateDupCheckboxStates();
+      updateTrashBtn();
+    });
+
     const chevron   = document.createElement('span');
     chevron.className = 'dup-group-chevron';
     chevron.textContent = '▾';
 
     hdr.appendChild(badge);
     hdr.appendChild(info);
+    hdr.appendChild(ignoreBtn);
     hdr.appendChild(chevron);
     hdr.addEventListener('click', () => div.classList.toggle('collapsed'));
 
@@ -1154,9 +1177,9 @@ function updateDupCheckboxStates() {
   });
 }
 
-// Recount only groups that still have 2+ live files and update the header text.
+// Recount only groups that still have 2+ live files and aren't ignored.
 function refreshDupSummary() {
-  const activeGroups = dupGroups.filter((g) => g.files.filter((f) => !f.trashed).length >= 2);
+  const activeGroups = dupGroups.filter((g) => !g.ignored && g.files.filter((f) => !f.trashed).length >= 2);
   if (activeGroups.length === 0) {
     dupSummary.textContent = 'Results — all resolved';
     return;
@@ -1174,12 +1197,28 @@ function updateTrashBtn() {
   const totalChecked = dupGroups.reduce(
     (sum, g) => sum + g.files.filter((f) => f.checked && !f.trashed).length, 0
   );
-  trashCheckedBtn.disabled = totalChecked === 0;
-  invertDupSelBtn.disabled = dupGroups.length === 0;
+  trashCheckedBtn.disabled  = totalChecked === 0;
+  uncheckAllDupBtn.disabled = dupGroups.length === 0;
+  invertDupSelBtn.disabled  = dupGroups.length === 0;
 }
+
+uncheckAllDupBtn.addEventListener('click', () => {
+  dupGroups.forEach((group, gi) => {
+    if (group.ignored) return;
+    group.files.forEach((f, fi) => {
+      if (f.trashed) return;
+      f.checked = false;
+      const cb = document.querySelector(`.dup-file-check[data-gi="${gi}"][data-fi="${fi}"]`);
+      if (cb) cb.checked = false;
+    });
+  });
+  updateDupCheckboxStates();
+  updateTrashBtn();
+});
 
 invertDupSelBtn.addEventListener('click', () => {
   dupGroups.forEach((group, gi) => {
+    if (group.ignored) return;
     const live = group.files.filter((f) => !f.trashed);
     live.forEach((f) => { f.checked = !f.checked; });
     // Safety: if all live files ended up checked, uncheck the last one
@@ -1204,8 +1243,9 @@ trashCheckedBtn.addEventListener('click', async () => {
   });
   if (toTrash.length === 0) return;
 
-  trashCheckedBtn.disabled = true;
-  invertDupSelBtn.disabled = true;
+  trashCheckedBtn.disabled  = true;
+  uncheckAllDupBtn.disabled = true;
+  invertDupSelBtn.disabled  = true;
 
   // Results are returned in the same order as the sent paths — match by index.
   const results = await electron.invoke('duplicates:trash', toTrash.map((t) => t.filePath));

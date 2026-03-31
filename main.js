@@ -66,6 +66,7 @@ function createWindow() {
     },
     title: 'ComixManagementTool',
     backgroundColor: '#1a1a2e',
+    icon: path.join(__dirname, 'assets', 'icon.ico'),
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
@@ -90,6 +91,10 @@ app.on('before-quit', () => {
   activeAbortController?.abort();
   sortAbortController?.abort();
   resizeAbortController?.abort();
+  dupAbortController?.abort();
+  flattenAbortController?.abort();
+  unwrapAbortController?.abort();
+  folderPackAbortController?.abort();
 });
 
 // App version
@@ -274,6 +279,11 @@ ipcMain.handle('shell:openFolder', (event, filePath) => {
   shell.showItemInFolder(filePath);
 });
 
+// Open a path directly in Explorer (for folders)
+ipcMain.handle('shell:openPath', (event, folderPath) => {
+  shell.openPath(folderPath);
+});
+
 // ── Resize CBZs ───────────────────────────────────────────────────────────────
 let resizeAbortController = null;
 let resizePausePromise    = null;
@@ -404,6 +414,377 @@ ipcMain.handle('conversion:convertSingle', async (event, { filePath, isManga }) 
   }
 });
 
+// ── Find Duplicates ───────────────────────────────────────────────────────────
+let dupAbortController = null;
+
+ipcMain.handle('duplicates:scan', async (event, { folder }) => {
+  dupAbortController = new AbortController();
+  const signal = dupAbortController.signal;
+
+  const sendLog = (msg, type = 'info') => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('duplicates:log', { msg, type });
+  };
+
+  const sendProgress = (current, total) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('duplicates:progress', { current, total });
+  };
+
+  try {
+    const { scanDuplicates } = require('./src/duplicates');
+    const result = await scanDuplicates(folder, sendLog, sendProgress, signal);
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('duplicates:complete', result);
+  } catch (err) {
+    if (err.name !== 'AbortError') sendLog(`Error: ${err.message}`, 'error');
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('duplicates:complete', { groups: [], aborted: true });
+  } finally {
+    dupAbortController = null;
+  }
+});
+
+ipcMain.handle('duplicates:cancel', () => {
+  dupAbortController?.abort();
+});
+
+ipcMain.handle('duplicates:trash', async (event, filePaths) => {
+  const results = [];
+  for (const filePath of filePaths) {
+    try {
+      await shell.trashItem(filePath);
+      results.push({ file: filePath, success: true });
+    } catch (err) {
+      results.push({ file: filePath, success: false, error: err.message });
+    }
+  }
+  return results;
+});
+
+// ── Fix the Library — Flatten ─────────────────────────────────────────────────
+let flattenAbortController  = null;
+let flattenPendingGroups    = null;  // held between scan and apply
+
+ipcMain.handle('flatten:scan', async (event, { folder }) => {
+  flattenAbortController = new AbortController();
+  const signal = flattenAbortController.signal;
+  flattenPendingGroups = null;
+
+  const sendLog = (msg, type = 'info', path = null) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:log', { msg, type, path });
+  };
+
+  const sendProgress = (current, total) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:progress', { current, total, phase: 'scan' });
+  };
+
+  try {
+    const { scanFlattenable } = require('./src/flattener');
+    const { groups, journalsDeleted } = await scanFlattenable(folder, sendLog, sendProgress, signal);
+    flattenPendingGroups = groups;
+
+    // Send renderer a display-friendly summary
+    const preview = groups.map((g) => ({
+      outer:     g.outer,      // absolute path (for Open Folder)
+      outerRel:  g.outerRel,
+      innerName: g.innerName,
+      itemCount: g.itemCount,
+    }));
+
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:scanComplete', {
+        preview, journalsDeleted, aborted: false,
+      });
+  } catch (err) {
+    if (err.name !== 'AbortError') sendLog(`Error: ${err.message}`, 'error');
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:scanComplete', {
+        preview: [], journalsDeleted: 0, aborted: true,
+      });
+  } finally {
+    flattenAbortController = null;
+  }
+});
+
+ipcMain.handle('flatten:apply', async (event, { folder, selectedOuterRels }) => {
+  if (!flattenPendingGroups) {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:applyComplete', { flattened: 0, failed: 0, aborted: false });
+    return;
+  }
+
+  flattenAbortController = new AbortController();
+  const signal = flattenAbortController.signal;
+
+  const sendLog = (msg, type = 'info', path = null) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:log', { msg, type, path });
+  };
+
+  const sendProgress = (current, total) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:progress', { current, total, phase: 'apply' });
+  };
+
+  const selected = new Set(selectedOuterRels);
+  const groups   = flattenPendingGroups.filter((g) => selected.has(g.outerRel));
+
+  try {
+    const { applyFlatten } = require('./src/flattener');
+    const result = await applyFlatten(folder, groups, sendLog, sendProgress, signal);
+    flattenPendingGroups = null;
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:applyComplete', {
+        flattened:     result.flattened,
+        failed:        result.failed,
+        flattenedRels: result.flattenedRels,
+        failedRels:    result.failedRels,
+        aborted:       false,
+      });
+  } catch (err) {
+    if (err.name !== 'AbortError') sendLog(`Error: ${err.message}`, 'error');
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:applyComplete', { flattened: 0, failed: 0, aborted: true });
+  } finally {
+    flattenAbortController = null;
+  }
+});
+
+ipcMain.handle('flatten:cancel', () => {
+  flattenAbortController?.abort();
+});
+
+ipcMain.handle('flatten:deleteEmpty', async (event, { folder }) => {
+  flattenAbortController = new AbortController();
+  const signal = flattenAbortController.signal;
+
+  const sendLog = (msg, type = 'info') => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:log', { msg, type });
+  };
+
+  const sendProgress = (current, total) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:progress', { current, total, phase: 'deleteEmpty' });
+  };
+
+  try {
+    const { deleteEmptyFolders } = require('./src/flattener');
+    const result = await deleteEmptyFolders(folder, sendLog, sendProgress, signal);
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:deleteEmptyComplete', { ...result, aborted: false });
+  } catch (err) {
+    if (err.name !== 'AbortError') sendLog(`Error: ${err.message}`, 'error');
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('flatten:deleteEmptyComplete', { deleted: [], aborted: true });
+  } finally {
+    flattenAbortController = null;
+  }
+});
+
+// ── Unwrap Bundle CBZs ────────────────────────────────────────────────────────
+let unwrapAbortController = null;
+let unwrapPendingGroups   = null;
+
+ipcMain.handle('unwrap:scan', async (event, { folder }) => {
+  unwrapAbortController = new AbortController();
+  const signal = unwrapAbortController.signal;
+  unwrapPendingGroups = null;
+
+  const sendLog = (msg, type = 'info', pathArg = null) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('unwrap:log', { msg, type, path: pathArg });
+  };
+  const sendProgress = (current, total) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('unwrap:progress', { current, total });
+  };
+
+  try {
+    const { scanBundles } = require('./src/unwrapper');
+    const { groups } = await scanBundles(folder, sendLog, sendProgress, signal);
+    unwrapPendingGroups = groups;
+
+    const preview = groups.map((g) => ({
+      cbzPath:          g.cbzPath,
+      cbzRel:           g.cbzRel,
+      previewTarget:    g.previewTarget,
+      previewTargetRel: g.previewTargetRel,
+      archiveCount:     g.archiveCount,
+      totalEntries:     g.totalEntries,
+    }));
+
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('unwrap:scanComplete', { preview, aborted: false });
+  } catch (err) {
+    if (err.name !== 'AbortError') sendLog(`Error: ${err.message}`, 'error');
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('unwrap:scanComplete', { preview: [], aborted: true });
+  } finally {
+    unwrapAbortController = null;
+  }
+});
+
+ipcMain.handle('unwrap:apply', async (event, { folder, selectedCbzPaths }) => {
+  if (!unwrapPendingGroups) {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('unwrap:applyComplete', { unwrapped: 0, failed: 0, extracted: [], aborted: false });
+    return;
+  }
+
+  unwrapAbortController = new AbortController();
+  const signal = unwrapAbortController.signal;
+
+  const sendLog = (msg, type = 'info', pathArg = null) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('unwrap:log', { msg, type, path: pathArg });
+  };
+  const sendProgress = (current, total) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('unwrap:progress', { current, total });
+  };
+
+  const selected = new Set(selectedCbzPaths);
+  const groups   = unwrapPendingGroups.filter((g) => selected.has(g.cbzPath));
+
+  try {
+    const { applyUnwrap } = require('./src/unwrapper');
+    const result = await applyUnwrap(folder, groups, sendLog, sendProgress, signal);
+    unwrapPendingGroups = null;
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('unwrap:applyComplete', { ...result, aborted: false });
+  } catch (err) {
+    if (err.name !== 'AbortError') sendLog(`Error: ${err.message}`, 'error');
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('unwrap:applyComplete', { unwrapped: 0, failed: 0, extracted: [], aborted: true });
+  } finally {
+    unwrapAbortController = null;
+  }
+});
+
+ipcMain.handle('unwrap:cancel', () => {
+  unwrapAbortController?.abort();
+});
+
+ipcMain.handle('unwrap:deleteOriginal', async (event, filePath) => {
+  try {
+    await shell.trashItem(filePath);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ── Scan Ext-Folders (folder-packer) ─────────────────────────────────────────
+let folderPackAbortController = null;
+let folderPackScanResult      = null;  // { convertGroups, renameGroups }
+
+ipcMain.handle('folderpack:scan', async (event, { folder }) => {
+  folderPackAbortController = new AbortController();
+  const signal = folderPackAbortController.signal;
+  folderPackScanResult = null;
+
+  const sendLog = (msg, type = 'info', pathArg = null) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('folderpack:log', { msg, type, path: pathArg });
+  };
+  const sendProgress = (current, total) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('folderpack:progress', { current, total });
+  };
+
+  try {
+    const { scanExtFolders } = require('./src/folder-packer');
+    const result = await scanExtFolders(folder, sendLog, sendProgress, signal);
+    folderPackScanResult = result;
+
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('folderpack:scanComplete', {
+        convertGroups: result.convertGroups,
+        renameGroups:  result.renameGroups,
+        aborted: false,
+      });
+  } catch (err) {
+    if (err.name !== 'AbortError') sendLog(`Error: ${err.message}`, 'error');
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('folderpack:scanComplete', { convertGroups: [], renameGroups: [], aborted: true });
+  } finally {
+    folderPackAbortController = null;
+  }
+});
+
+ipcMain.handle('folderpack:convert', async (event, { folder, selectedFolderPaths }) => {
+  if (!folderPackScanResult) {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('folderpack:convertComplete', { converted: 0, failed: 0, convertedItems: [], aborted: false });
+    return;
+  }
+
+  folderPackAbortController = new AbortController();
+  const signal = folderPackAbortController.signal;
+
+  const sendLog = (msg, type = 'info', pathArg = null) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('folderpack:log', { msg, type, path: pathArg });
+  };
+  const sendProgress = (current, total) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('folderpack:progress', { current, total });
+  };
+
+  const selected = new Set(selectedFolderPaths);
+  const groups   = folderPackScanResult.convertGroups.filter((g) => selected.has(g.folderPath));
+
+  try {
+    const { applyConvertFolders } = require('./src/folder-packer');
+    const result = await applyConvertFolders(folder, groups, sendLog, sendProgress, signal);
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('folderpack:convertComplete', { ...result, aborted: false });
+  } catch (err) {
+    if (err.name !== 'AbortError') sendLog(`Error: ${err.message}`, 'error');
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('folderpack:convertComplete', { converted: 0, failed: 0, convertedItems: [], aborted: true });
+  } finally {
+    folderPackAbortController = null;
+  }
+});
+
+ipcMain.handle('folderpack:rename', (event, { folder, selectedFolderPaths }) => {
+  if (!folderPackScanResult) return { renamed: 0, failed: 0 };
+
+  const sendLog = (msg, type = 'info', pathArg = null) => {
+    if (!mainWindow.isDestroyed())
+      mainWindow.webContents.send('folderpack:log', { msg, type, path: pathArg });
+  };
+
+  const selected = new Set(selectedFolderPaths);
+  const groups   = folderPackScanResult.renameGroups.filter((g) => selected.has(g.folderPath));
+
+  const { applyRenameFolders } = require('./src/folder-packer');
+  const result = applyRenameFolders(folder, groups, sendLog);
+
+  if (!mainWindow.isDestroyed())
+    mainWindow.webContents.send('folderpack:renameComplete', { ...result });
+
+  return result;
+});
+
+ipcMain.handle('folderpack:cancel', () => {
+  folderPackAbortController?.abort();
+});
+
+ipcMain.handle('folderpack:deleteFolder', async (event, folderPath) => {
+  try {
+    await shell.trashItem(folderPath);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 // Delete original files after user confirms
 ipcMain.handle('conversion:deleteOriginals', async (event, files) => {
   const results = [];
@@ -414,7 +795,12 @@ ipcMain.handle('conversion:deleteOriginals', async (event, files) => {
       await fs.promises.unlink(filePath);
       results.push({ file: filePath, success: true, sizeBytes });
     } catch (err) {
-      results.push({ file: filePath, success: false, error: err.message, sizeBytes: 0 });
+      // ENOENT = already gone; treat as success (goal achieved)
+      if (err.code === 'ENOENT') {
+        results.push({ file: filePath, success: true, sizeBytes: 0 });
+      } else {
+        results.push({ file: filePath, success: false, error: err.message, sizeBytes: 0 });
+      }
     }
   }
   return results;

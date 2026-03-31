@@ -84,6 +84,14 @@ Manga pattern:  `Series Title - Vol XX - Ch YYY`
 | `conversion:progress` | main → renderer | `{ current, total }` |
 | `conversion:complete` | main → renderer | `{ originals: string[], aborted?: boolean }` |
 
+## Versioning
+
+Bump `version` in `package.json` automatically after every code change, before committing:
+
+- **Patch** `x.x.+1` — bug fixes, small UI tweaks, copy changes
+- **Minor** `x.+1.0` — new features, meaningful UX additions, new IPC flows
+- **Major** `+1.0.0` — breaking changes or complete overhauls (confirm with user first)
+
 ## Key Conventions
 
 - Use `-LiteralPath` (PowerShell) / literal file paths everywhere — filenames contain `[`, `]`, spaces.
