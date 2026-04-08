@@ -1,0 +1,243 @@
+/* ══ CYBERPUNK 2077 ════════════════════════════════════════════════════════
+   Night City — neon cyan + hot pink on deep void.
+   Scanlines, glitch title, pulsing neon border, data rain.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Backgrounds */
+  --bg:            #0a0614;
+  --surface:       #0e0a22;
+  --surface2:      #161230;
+  --panel-bg:      #0e0a22;
+  --hover:         rgba(0, 240, 255, 0.08);
+
+  /* Border */
+  --border:        rgba(0, 240, 255, 0.18);
+  --radius:        3px;
+
+  /* Accent */
+  --accent:        #00f0ff;
+  --accent-dim:    #007a82;
+  --on-accent:     #000a10;
+
+  /* Text */
+  --text:          #c8f0ff;
+  --text-muted:    #4a7888;
+  --text-dim:      #2e5060;
+
+  /* Status */
+  --success:       #00ff88;
+  --warn:          #ff8800;
+  --error:         #ff2058;
+  --skip:          #406070;
+  --header-fg:     #00f0ff;
+  --diff-add:      #00ff88;
+
+  /* Fonts — all monospace for that hacker terminal feel */
+  --mono:          'Consolas', 'Courier New', monospace;
+  --sans:          'Consolas', 'Courier New', monospace;
+
+  /* Button families — cyan / pink / yellow */
+  --btn-sort-bg:       #0a2a3a;
+  --btn-sort-fg:       #00f0ff;
+  --btn-sort-border:   rgba(0, 240, 255, 0.45);
+  --btn-resize-bg:     #0a2a1a;
+  --btn-resize-fg:     #00ff88;
+  --btn-resize-border: rgba(0, 255, 136, 0.4);
+  --btn-dup-bg:        #1a0a2a;
+  --btn-dup-fg:        #c882ff;
+  --btn-dup-border:    rgba(200, 130, 255, 0.4);
+  --btn-fix-bg:        #2a1a0a;
+  --btn-fix-fg:        #ffaa00;
+  --btn-fix-border:    rgba(255, 170, 0, 0.4);
+  --btn-del-bg:        #2a0a18;
+  --btn-del-fg:        #ff2058;
+  --btn-del-border:    rgba(255, 32, 88, 0.45);
+  --danger-bg:         #2a0a18;
+  --danger-fg:         #ff88a8;
+  --danger-border:     rgba(255, 32, 88, 0.55);
+
+  /* Badges */
+  --badge-exact-bg:     #2a0a18;  --badge-exact-fg:     #ff88a8;
+  --badge-samename-bg:  #0a1a2a;  --badge-samename-fg:  #00f0ff;
+  --badge-similar-bg:   #1a1a08;  --badge-similar-fg:   #e8ff00;
+}
+
+/* ── Scanline overlay ──────────────────────────────────────────────────── */
+.app::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 3px,
+    rgba(0, 0, 0, 0.18) 3px,
+    rgba(0, 0, 0, 0.18) 4px
+  );
+}
+
+/* ── Pulsing neon border ───────────────────────────────────────────────── */
+.app {
+  animation: cp-neon-surge 7s ease-in-out infinite;
+}
+@keyframes cp-neon-surge {
+  0%, 100% { box-shadow: inset 0 0 18px rgba(0, 240, 255, 0.06), 0 0 1px rgba(0, 240, 255, 0.3); }
+  25%      { box-shadow: inset 0 0 28px rgba(0, 240, 255, 0.10), 0 0 1px rgba(0, 240, 255, 0.6); }
+  26%      { box-shadow: inset 0 0 22px rgba(255, 32, 88, 0.08), 0 0 1px rgba(255, 32, 88, 0.45); }
+  27%      { box-shadow: inset 0 0 30px rgba(0, 240, 255, 0.12), 0 0 1px rgba(0, 240, 255, 0.65); }
+  50%      { box-shadow: inset 0 0 16px rgba(0, 240, 255, 0.04), 0 0 1px rgba(0, 240, 255, 0.2); }
+  75%      { box-shadow: inset 0 0 26px rgba(255, 32, 88, 0.09), 0 0 1px rgba(255, 32, 88, 0.5); }
+  76%      { box-shadow: inset 0 0 20px rgba(232, 255, 0, 0.06), 0 0 1px rgba(232, 255, 0, 0.35); }
+  77%      { box-shadow: inset 0 0 28px rgba(255, 32, 88, 0.10), 0 0 1px rgba(255, 32, 88, 0.55); }
+}
+
+/* ── Header styling ────────────────────────────────────────────────────── */
+.app-header {
+  background: rgba(6, 2, 28, 0.95);
+  border-bottom: 2px solid rgba(0, 240, 255, 0.5);
+  box-shadow: 0 2px 12px rgba(0, 240, 255, 0.15);
+  position: relative;
+}
+
+.app-header::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: linear-gradient(to bottom, #00f0ff, rgba(0, 240, 255, 0.3));
+  box-shadow: 0 0 8px #00f0ff, 0 0 20px rgba(0, 240, 255, 0.5);
+}
+
+.app-header::after {
+  content: 'NIGHT CITY  ///  CORPO PLAZA  //  JACKED IN';
+  position: absolute;
+  right: 140px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 8px;
+  letter-spacing: 2px;
+  color: rgba(0, 240, 255, 0.30);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* ── Glitch title animation ────────────────────────────────────────────── */
+.app-title {
+  animation: cp-glitch 6s infinite;
+  color: #00f0ff;
+  text-shadow: 0 0 8px rgba(0, 240, 255, 0.6);
+}
+
+@keyframes cp-glitch {
+  0%, 90%, 100% {
+    text-shadow: 0 0 8px #00f0ff, 0 0 20px rgba(0, 240, 255, 0.6);
+    transform: translate(0, 0);
+    clip-path: none;
+  }
+  91% {
+    text-shadow: -3px 0 #ff2058, 3px 0 #00f0ff;
+    transform: translate(-2px, 0);
+    clip-path: polygon(0 20%, 100% 20%, 100% 40%, 0 40%);
+  }
+  92% {
+    text-shadow: 3px 0 #ff2058, -3px 0 #00f0ff;
+    transform: translate(2px, 0);
+    clip-path: polygon(0 60%, 100% 60%, 100% 80%, 0 80%);
+  }
+  93% {
+    text-shadow: 0 0 8px #00f0ff, 0 0 20px rgba(0, 240, 255, 0.6);
+    transform: translate(0, 0);
+    clip-path: none;
+  }
+  95% {
+    text-shadow: -2px 0 #ff2058, 2px 0 #e8ff00;
+    transform: translate(1px, 0);
+    clip-path: polygon(0 45%, 100% 45%, 100% 55%, 0 55%);
+  }
+  96% {
+    text-shadow: 0 0 8px #00f0ff, 0 0 20px rgba(0, 240, 255, 0.6);
+    transform: translate(0, 0);
+    clip-path: none;
+  }
+}
+
+/* ── Corner brackets on main content ───────────────────────────────────── */
+.main-content {
+  position: relative;
+}
+.main-content::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    /* top-left bracket — cyan */
+    linear-gradient(to right,  rgba(0, 240, 255, 0.30) 0px, rgba(0, 240, 255, 0.30) 2px, transparent 2px) 4px 4px / 16px 2px no-repeat,
+    linear-gradient(to bottom, rgba(0, 240, 255, 0.30) 0px, rgba(0, 240, 255, 0.30) 2px, transparent 2px) 4px 4px / 2px 16px no-repeat,
+    /* top-right bracket — cyan */
+    linear-gradient(to left,   rgba(0, 240, 255, 0.30) 0px, rgba(0, 240, 255, 0.30) 2px, transparent 2px) calc(100% - 4px) 4px / 16px 2px no-repeat,
+    linear-gradient(to bottom, rgba(0, 240, 255, 0.30) 0px, rgba(0, 240, 255, 0.30) 2px, transparent 2px) calc(100% - 5px) 4px / 2px 16px no-repeat,
+    /* bottom-left bracket — pink */
+    linear-gradient(to right,  rgba(255, 32, 88, 0.30) 0px, rgba(255, 32, 88, 0.30) 2px, transparent 2px) 4px calc(100% - 4px) / 16px 2px no-repeat,
+    linear-gradient(to top,    rgba(255, 32, 88, 0.30) 0px, rgba(255, 32, 88, 0.30) 2px, transparent 2px) 4px calc(100% - 4px) / 2px 16px no-repeat,
+    /* bottom-right bracket — pink */
+    linear-gradient(to left,   rgba(255, 32, 88, 0.30) 0px, rgba(255, 32, 88, 0.30) 2px, transparent 2px) calc(100% - 4px) calc(100% - 4px) / 16px 2px no-repeat,
+    linear-gradient(to top,    rgba(255, 32, 88, 0.30) 0px, rgba(255, 32, 88, 0.30) 2px, transparent 2px) calc(100% - 5px) calc(100% - 4px) / 2px 16px no-repeat;
+}
+
+/* ── Data rain particle background ─────────────────────────────────────── */
+.main-content::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.6;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='180'%3E%3Crect x='14' y='20' width='1.5' height='8' rx='0.5' fill='rgba(0,240,255,0.30)'/%3E%3Crect x='42' y='80' width='1.5' height='6' rx='0.5' fill='rgba(0,240,255,0.22)'/%3E%3Crect x='71' y='140' width='1.5' height='10' rx='0.5' fill='rgba(255,32,88,0.18)'/%3E%3Crect x='89' y='50' width='1.5' height='5' rx='0.5' fill='rgba(0,240,255,0.16)'/%3E%3C/svg%3E") repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='300'%3E%3Crect x='20' y='40' width='2' height='12' rx='0.5' fill='rgba(0,240,255,0.18)'/%3E%3Crect x='60' y='140' width='2' height='8' rx='0.5' fill='rgba(255,32,88,0.14)'/%3E%3Crect x='110' y='240' width='2' height='14' rx='0.5' fill='rgba(0,240,255,0.16)'/%3E%3Crect x='140' y='80' width='2' height='6' rx='0.5' fill='rgba(232,255,0,0.10)'/%3E%3C/svg%3E") repeat;
+  background-size: 100px 180px, 160px 300px;
+  animation: cp-data-rain 4s linear infinite;
+}
+@keyframes cp-data-rain {
+  from { background-position: 0 -180px, 30px -300px; }
+  to   { background-position: 0 0, 30px 0; }
+}
+
+/* ── Tab bar glow ──────────────────────────────────────────────────────── */
+.tab-btn.active {
+  box-shadow: 0 0 8px rgba(0, 240, 255, 0.4), inset 0 0 6px rgba(0, 240, 255, 0.1);
+}
+
+/* ── Panel neon border hint ────────────────────────────────────────────── */
+.panel {
+  border-color: rgba(0, 240, 255, 0.12);
+  box-shadow: inset 0 0 12px rgba(0, 240, 255, 0.03);
+}
+
+/* ── Log container terminal feel ───────────────────────────────────────── */
+.log-container {
+  border-color: rgba(0, 240, 255, 0.15);
+  box-shadow: inset 0 0 20px rgba(0, 240, 255, 0.04);
+}
+
+/* ── Progress bar glow ─────────────────────────────────────────────────── */
+.progress-fill {
+  background: linear-gradient(90deg, #007a82, #00f0ff);
+  box-shadow: 0 0 8px rgba(0, 240, 255, 0.5);
+}
+
+/* ── Scrollbar — cyan ──────────────────────────────────────────────────── */
+::-webkit-scrollbar-thumb       { background: rgba(0, 240, 255, 0.25); }
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 240, 255, 0.45); }
+
+/* ── Modal overlay — deeper ────────────────────────────────────────────── */
+.modal-overlay { background: rgba(2, 1, 10, 0.80); }
+.modal-box { border-color: rgba(0, 240, 255, 0.25); box-shadow: 0 0 30px rgba(0, 240, 255, 0.1); }
+
+/* ── Checkbox accent ───────────────────────────────────────────────────── */
+input[type="checkbox"] { accent-color: #00f0ff; }

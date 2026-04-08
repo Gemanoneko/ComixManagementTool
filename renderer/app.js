@@ -167,6 +167,25 @@ sortSourcePathEl.value = sortSourceFolder;
 sortTargetPathEl.value = sortTargetFolder;
 updateSortBtn();
 
+// ── Theme switching ──────────────────────────────────────────────────────────
+const themePicker     = document.getElementById('themePicker');
+const themeStylesheet = document.getElementById('theme-stylesheet');
+
+function applyTheme(themeId) {
+  if (themeId) {
+    themeStylesheet.href = `themes/${themeId}.css`;
+  } else {
+    themeStylesheet.removeAttribute('href');
+  }
+  localStorage.setItem('comix-theme', themeId || '');
+}
+
+const savedTheme = localStorage.getItem('comix-theme') || '';
+themePicker.value = savedTheme;
+applyTheme(savedTheme);
+
+themePicker.addEventListener('change', () => applyTheme(themePicker.value));
+
 // ── Tab switching ─────────────────────────────────────────────────────────────
 tabBtns.forEach((btn) => {
   btn.addEventListener('click', () => {

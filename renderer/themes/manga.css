@@ -1,0 +1,256 @@
+/* ══ MANGA ═════════════════════════════════════════════════════════════════
+   B&W manga page — ink black on white, red accent, screentone dots.
+   Thin precise borders, speed lines, minimal Japanese-inspired aesthetic.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Backgrounds — clean paper white */
+  --bg:            #f2f2f2;
+  --surface:       #e8e8e8;
+  --surface2:      #dcdcdc;
+  --panel-bg:      #e8e8e8;
+  --hover:         rgba(212, 0, 13, 0.05);
+
+  /* Border — ink black, thin */
+  --border:        #222;
+  --radius:        2px;
+
+  /* Accent — Rising Sun red */
+  --accent:        #c8000a;
+  --accent-dim:    #8a0006;
+  --on-accent:     #fff;
+
+  /* Text — ink */
+  --text:          #111;
+  --text-muted:    #555;
+  --text-dim:      #777;
+
+  /* Status */
+  --success:       #1a6a1a;
+  --warn:          #a06800;
+  --error:         #c8000a;
+  --skip:          #888;
+  --header-fg:     #c8000a;
+  --diff-add:      #1a6a1a;
+
+  /* Fonts — clean, precise */
+  --mono:          'Consolas', 'Courier New', monospace;
+  --sans:          'Segoe UI', system-ui, sans-serif;
+
+  /* Button families — restrained, ink-based */
+  --btn-sort-bg:       #222;
+  --btn-sort-fg:       #eee;
+  --btn-sort-border:   #111;
+  --btn-resize-bg:     #1a6a1a;
+  --btn-resize-fg:     #fff;
+  --btn-resize-border: #145214;
+  --btn-dup-bg:        #444;
+  --btn-dup-fg:        #eee;
+  --btn-dup-border:    #333;
+  --btn-fix-bg:        #a06800;
+  --btn-fix-fg:        #fff;
+  --btn-fix-border:    #7a5000;
+  --btn-del-bg:        #c8000a;
+  --btn-del-fg:        #fff;
+  --btn-del-border:    #8a0006;
+  --danger-bg:         #c8000a;
+  --danger-fg:         #fff;
+  --danger-border:     #8a0006;
+
+  /* Badges — minimal, high contrast */
+  --badge-exact-bg:     #c8000a;  --badge-exact-fg:     #fff;
+  --badge-samename-bg:  #222;     --badge-samename-fg:  #eee;
+  --badge-similar-bg:   #a06800;  --badge-similar-fg:   #fff;
+}
+
+/* ── Screentone dot pattern ────────────────────────────────────────────── */
+.app::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9998;
+  background: radial-gradient(circle, rgba(0, 0, 0, 0.04) 0.8px, transparent 0.8px);
+  background-size: 4px 4px;
+}
+
+/* ── Speed lines — subtle radial from bottom-right corner ──────────────── */
+.app::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9997;
+  background:
+    repeating-conic-gradient(
+      from 0deg at 105% 105%,
+      transparent 0deg,
+      transparent 0.8deg,
+      rgba(0, 0, 0, 0.018) 0.8deg,
+      rgba(0, 0, 0, 0.018) 1deg
+    );
+}
+
+/* ── Header — minimal, ink line ────────────────────────────────────────── */
+.app-header {
+  background: #fff;
+  border-bottom: 2px solid #111;
+  position: relative;
+}
+
+/* Red accent ribbon */
+.app-header::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 4px;
+  background: #c8000a;
+}
+
+.app-title {
+  color: #111;
+  font-weight: 800;
+  letter-spacing: 1px;
+}
+
+.app-subtitle { color: #666; }
+.app-version  { color: #666; }
+
+/* ── Japanese-inspired decorative mark ─────────────────────────────────── */
+.app-header::after {
+  content: '漫画';
+  position: absolute;
+  right: 140px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 18px;
+  color: rgba(200, 0, 10, 0.10);
+  pointer-events: none;
+  font-weight: 300;
+}
+
+/* ── Panels — thin, precise ────────────────────────────────────────────── */
+.panel {
+  border: 1px solid #222;
+  background: #eee;
+}
+
+/* ── Tab bar — clean outlined ──────────────────────────────────────────── */
+.tab-bar {
+  border: 1px solid #222;
+  background: #e8e8e8;
+}
+.tab-btn {
+  font-weight: 700;
+  border-radius: 2px;
+  color: #444;
+}
+.tab-btn.active {
+  background: #111;
+  color: #fff;
+}
+.tab-btn:hover:not(.active) { background: rgba(0, 0, 0, 0.06); color: #111; }
+
+/* ── Log container — writing paper ─────────────────────────────────────── */
+.log-container {
+  border: 1px solid #222;
+  background: #fafafa;
+  color: #111;
+}
+
+/* ── Progress bar — red fill ───────────────────────────────────────────── */
+.progress-track {
+  border: 1px solid #222;
+  background: #ddd;
+}
+.progress-fill {
+  background: linear-gradient(90deg, #8a0006, #c8000a);
+}
+
+/* ── Buttons — flat, no shadow ─────────────────────────────────────────── */
+.btn {
+  border-radius: 2px;
+  font-weight: 700;
+}
+
+.btn-primary { border: 1px solid #8a0006; }
+.btn-secondary { border: 1px solid #333; }
+
+/* ── Folder input ──────────────────────────────────────────────────────── */
+.folder-input {
+  background: #fafafa;
+  border: 1px solid #222;
+  color: #111;
+}
+
+/* ── Preset buttons ────────────────────────────────────────────────────── */
+.preset-btn, .tab-preset-btn {
+  border: 1px solid #333;
+  background: #fafafa;
+  color: #222;
+}
+.preset-btn:hover, .tab-preset-btn:hover { border-color: #c8000a; color: #c8000a; }
+
+/* ── Duplicate group ───────────────────────────────────────────────────── */
+.dup-group {
+  border: 1px solid #222;
+  border-radius: 2px;
+}
+.dup-group-header {
+  background: #e0e0e0;
+}
+.dup-group-header:hover { background: #d8d8d8; }
+
+.dup-badge { border-radius: 2px; }
+
+.dup-file-row { border-bottom-color: #ccc; }
+.dup-file-row:hover { background: rgba(200, 0, 10, 0.04); }
+.dup-file-path { color: #111; }
+
+/* ── Fix rows ──────────────────────────────────────────────────────────── */
+.fix-group-row {
+  border: 1px solid #222;
+  border-radius: 2px;
+  background: #fafafa;
+}
+.fix-group-row:hover { background: #f0f0f0; }
+
+/* ── Modal ─────────────────────────────────────────────────────────────── */
+.modal-overlay { background: rgba(0, 0, 0, 0.45); }
+.modal-box {
+  border: 2px solid #111;
+  background: #f5f5f5;
+}
+
+/* ── Toggle ────────────────────────────────────────────────────────────── */
+.toggle-track { border: 1px solid #333; }
+.toggle-track::after { background: #888; }
+
+/* ── Scrollbar — subtle ink ────────────────────────────────────────────── */
+::-webkit-scrollbar-thumb       { background: rgba(0, 0, 0, 0.18); }
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.32); }
+
+/* ── Theme picker ──────────────────────────────────────────────────────── */
+.theme-picker {
+  background: #fafafa;
+  color: #444;
+  border: 1px solid #333;
+}
+.theme-picker:hover { border-color: #c8000a; }
+
+/* ── Ink splatter decoration on log panel ──────────────────────────────── */
+.log-panel::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  right: 30px;
+  width: 60px;
+  height: 20px;
+  pointer-events: none;
+  opacity: 0.05;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 60 20'%3E%3Cellipse cx='30' cy='10' rx='25' ry='7' fill='%23000'/%3E%3Cellipse cx='12' cy='6' rx='6' ry='4' fill='%23000'/%3E%3Cellipse cx='48' cy='14' rx='5' ry='3' fill='%23000'/%3E%3Ccircle cx='8' cy='3' r='2' fill='%23000'/%3E%3Ccircle cx='52' cy='17' r='1.5' fill='%23000'/%3E%3C/svg%3E") no-repeat center;
+}
+.log-panel { position: relative; }
+
+/* ── Checkbox accent ───────────────────────────────────────────────────── */
+input[type="checkbox"] { accent-color: #c8000a; }

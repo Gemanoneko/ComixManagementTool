@@ -3,9 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+        content="default-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'" />
   <title>ComixManagementTool</title>
   <link rel="stylesheet" href="styles.css" />
+  <link id="theme-stylesheet" rel="stylesheet" href="" />
 </head>
 <body>
   <div class="app">
@@ -15,6 +16,12 @@
       <span class="app-title">ComixManagementTool</span>
       <span class="app-subtitle">Comic Archive Converter</span>
       <span class="app-version" id="appVersion"></span>
+      <select id="themePicker" class="theme-picker" title="Switch visual theme">
+        <option value="">Default</option>
+        <option value="cyberpunk">Cyberpunk 2077</option>
+        <option value="comics">Comics</option>
+        <option value="manga">Manga</option>
+      </select>
     </header>
 
     <!-- Main content -->
