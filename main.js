@@ -75,6 +75,10 @@ function createWindow() {
 app.whenReady().then(() => {
   cleanupOrphanedTempDirs();
   createWindow();
+
+  const { setupUpdater, checkForUpdates } = require('./src/updater');
+  setupUpdater(mainWindow);
+  ipcMain.handle('check-update', () => checkForUpdates());
 });
 
 app.on('window-all-closed', () => {

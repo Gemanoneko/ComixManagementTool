@@ -239,7 +239,7 @@ body {
 
 .toggle-wrap input:checked + .toggle-track::after {
   transform: translateX(16px);
-  background: #fff;
+  background: var(--on-accent);
 }
 
 .toggle-text { font-size: .85rem; }
@@ -1035,6 +1035,33 @@ body {
   font-size: .7rem;
   font-family: var(--sans);
 }
+
+/* ── Update banner ─────────────────────────────────────────────────────── */
+.update-banner {
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 16px;
+  font-size: .78rem;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.update-btn {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 4px;
+  padding: 3px 12px;
+  font-size: .75rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: var(--sans);
+}
+.update-btn:hover { opacity: .85; }
+.update-btn:disabled { opacity: .4; cursor: not-allowed; }
 
 /* ── Theme picker ──────────────────────────────────────────────────────── */
 .theme-picker {

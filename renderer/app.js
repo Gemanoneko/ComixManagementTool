@@ -186,6 +186,47 @@ applyTheme(savedTheme);
 
 themePicker.addEventListener('change', () => applyTheme(themePicker.value));
 
+// ── Auto-update ──────────────────────────────────────────────────────────────
+const checkUpdateBtn = document.getElementById('checkUpdateBtn');
+const updateBanner   = document.getElementById('updateBanner');
+const updateText     = document.getElementById('updateText');
+const updateActions  = document.getElementById('updateActions');
+let updateDismissTimer = null;
+
+function showUpdateBanner(text, actions = [], autoDismissMs = 0) {
+  clearTimeout(updateDismissTimer);
+  updateText.textContent = text;
+  updateActions.innerHTML = '';
+  for (const { label, action } of actions) {
+    const btn = document.createElement('button');
+    btn.className = 'update-btn';
+    btn.textContent = label;
+    btn.addEventListener('click', async () => {
+      if (action === 'download') {
+        btn.textContent = 'Downloading...';
+        btn.disabled = true;
+        await electron.invoke('download-update');
+      } else if (action === 'install') {
+        await electron.invoke('install-update');
+      }
+    });
+    updateActions.appendChild(btn);
+  }
+  updateBanner.classList.remove('hidden');
+  if (autoDismissMs > 0) {
+    updateDismissTimer = setTimeout(() => updateBanner.classList.add('hidden'), autoDismissMs);
+  }
+}
+
+checkUpdateBtn.addEventListener('click', () => electron.invoke('check-update'));
+
+electron.on('update-checking',     ()     => showUpdateBanner('Checking for updates...'));
+electron.on('update-available',    (info) => showUpdateBanner(`Update v${info.version} available`, [{ label: 'Download', action: 'download' }]));
+electron.on('update-not-available', ()    => showUpdateBanner('Up to date', [], 3000));
+electron.on('update-progress',     (pct)  => { updateText.textContent = `Downloading... ${pct}%`; });
+electron.on('update-ready',        ()     => showUpdateBanner('Update ready — will install and restart', [{ label: 'Install Now', action: 'install' }]));
+electron.on('update-error',        (msg)  => showUpdateBanner(`Update error: ${msg}`, [], 6000));
+
 // ── Tab switching ─────────────────────────────────────────────────────────────
 tabBtns.forEach((btn) => {
   btn.addEventListener('click', () => {

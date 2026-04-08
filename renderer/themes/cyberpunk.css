@@ -109,6 +109,7 @@
   width: 3px;
   background: linear-gradient(to bottom, #00f0ff, rgba(0, 240, 255, 0.3));
   box-shadow: 0 0 8px #00f0ff, 0 0 20px rgba(0, 240, 255, 0.5);
+  pointer-events: none;
 }
 
 .app-header::after {

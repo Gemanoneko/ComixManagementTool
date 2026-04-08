@@ -15,17 +15,25 @@ npm install          # installs electron + adm-zip + electron-builder
 npm start            # launches the Electron app (dev mode)
 ```
 
-## Building a Standalone Executable
+## Building
 
 ```bash
 npm run prepare-vendor   # copies 7z.exe + 7z.dll from C:\Program Files\7-Zip into vendor/7zip/
-npm run dist             # builds both portable .exe and NSIS installer → dist/
+npm run dist             # local portable build (dir target + icon stamp) → dist/win-unpacked/
+npm run pack             # local NSIS installer (no publish) → dist/
+npm run build            # CI: NSIS installer + publish to GitHub Releases
 ```
 
-Produces `dist/ComixManagementTool-x.x.x-portable.exe` — single file, no installation needed.
-
-**What gets bundled:** adm-zip (JS), 7-Zip (`vendor/7zip/`).
+**What gets bundled:** adm-zip (JS), electron-updater, 7-Zip (`vendor/7zip/`).
 **Not bundled:** ImageMagick — the app auto-detects it at runtime from `C:\Program Files\ImageMagick*\magick.exe` or PATH. PDF conversion will fail gracefully if ImageMagick is missing.
+
+## Releasing
+
+1. Bump version in `package.json`, commit with `v{version}: description`
+2. Tag and push: `git tag v{version} && git push && git push origin v{version}`
+3. GitHub Actions (`.github/workflows/build.yml`) builds the NSIS installer and creates a GitHub Release
+4. Post-build `scripts/cleanup-releases.js` auto-deletes old releases (keeps 4)
+5. Installed apps auto-check for updates 5s after launch via `electron-updater`
 
 ## External Dependencies (must be installed separately)
 

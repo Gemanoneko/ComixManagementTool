@@ -1,14 +1,19 @@
 {
   "name": "comix-management-tool",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Comic archive conversion and management tool",
   "main": "main.js",
   "scripts": {
-    "start":           "electron .",
-    "prepare-vendor":  "node scripts/prepare-vendor.js",
-    "dist":            "electron-builder --win && node scripts/stamp-icon.js"
+    "start":          "electron .",
+    "prepare-vendor": "node scripts/prepare-vendor.js",
+    "build":          "electron-builder --win --publish always",
+    "postbuild":      "node scripts/cleanup-releases.js",
+    "pack":           "electron-builder --win --publish never",
+    "dist":           "electron-builder --win --publish never && node scripts/stamp-icon.js"
   },
-  "dependencies": {},
+  "dependencies": {
+    "electron-updater": "^6.8.3"
+  },
   "devDependencies": {
     "electron":         "^29.0.0",
     "electron-builder": "^24.0.0"
@@ -40,8 +45,23 @@
     "win": {
       "icon": "assets/icon.ico",
       "target": [
-        { "target": "dir", "arch": ["x64"] }
+        { "target": "nsis", "arch": ["x64"] }
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "runAfterFinish": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Gemanoneko",
+      "repo": "ComixManagementTool",
+      "releaseType": "release"
     }
   }
 }
