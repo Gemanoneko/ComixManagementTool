@@ -117,10 +117,45 @@ async function canOpenCbz(cbzPath) {
 
 // ─── Extraction ─────────────────────────────────────────────────────────────
 
+// Returns an array of filenames that were skipped due to CRC corruption
+// (empty array on a clean extraction).  Throws on fatal errors.
 async function extractArchive(srcFile, destDir, signal) {
   const sevenZip = getSevenZip();
   if (!sevenZip) throw new Error('7-Zip not found. Install 7-Zip or run "npm run prepare-vendor".');
-  await execFilePromise(sevenZip, ['x', `-o${destDir}`, '-y', '--', srcFile], signal);
+
+  try {
+    await execFilePromise(sevenZip, ['x', `-o${destDir}`, '-y', '--', srcFile], signal);
+  } catch (err) {
+    if (err.name === 'AbortError' || signal?.aborted) throw err;
+
+    // 7-Zip exits with code 2 when one or more entries fail the CRC check but
+    // the rest of the archive is intact.  Parse the stderr for the affected
+    // filenames, delete those (potentially corrupt) extracts, and continue so
+    // the remaining pages can still be converted.
+    const crcNames = [];
+    for (const line of (err.stderr || '').split(/\r?\n/)) {
+      const m = line.match(/^(ERROR:\s+)?CRC Failed\s*(?:\(reading\))?\s*:\s*(.+)$/i);
+      if (m) crcNames.push(m[2].trim());
+    }
+
+    // If there were non-CRC errors too, or no CRC names found, treat as fatal.
+    // Only lines that START with "ERROR:" are actual error lines; summary lines
+    // like "Sub items Errors: 1" and "Archives with Errors: 1" must be excluded
+    // or the nonCrcError check fires on every CRC failure, killing the recovery.
+    const nonCrcError = (err.stderr || '').split(/\r?\n/).some(
+      (l) => /^error:/i.test(l.trim()) && !/CRC Failed/i.test(l),
+    );
+    if (nonCrcError || crcNames.length === 0) throw err;
+
+    // Delete the bad extracts so they don't end up in the output CBZ.
+    for (const name of crcNames) {
+      const full = path.join(destDir, name);
+      try { await fs.promises.unlink(full); } catch {}
+    }
+    return crcNames;
+  }
+
+  return []; // clean extraction — no corrupt pages
 }
 
 /**
@@ -362,6 +397,25 @@ function shallowImages(dir) {
     .sort((a, b) => naturalSort(path.basename(a), path.basename(b)));
 }
 
+/** Collect all .xml files directly inside dir (non-recursive). */
+function shallowXml(dir) {
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.xml')
+    .map((e) => path.join(dir, e.name));
+}
+
+/** Collect all .xml files under dir, recursively. */
+function deepXml(dir) {
+  const results = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) results.push(...deepXml(full));
+    else if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.xml') results.push(full);
+  }
+  return results;
+}
+
 /** Collect ALL image files under dir, recursively. */
 function deepImages(dir) {
   const results = [];
@@ -405,11 +459,17 @@ function topLevelStructure(dir) {
 function buildGroups(tmpDir, archiveBaseName, archiveParentDir) {
   const { loose, subdirs } = topLevelStructure(tmpDir);
 
+  // Helper: merge images + XML from a dir, keeping images for count tracking
+  function mergeWithXml(images, xmlFiles) {
+    return [...images, ...xmlFiles];
+  }
+
   // Case A: no subdirs → single flat archive
   if (subdirs.length === 0) {
-    const files = shallowImages(tmpDir);
-    if (files.length === 0) return [];
-    return [{ name: archiveBaseName, files, parentName: archiveParentDir, isSplit: false }];
+    const images = shallowImages(tmpDir);
+    if (images.length === 0) return [];
+    const files = mergeWithXml(images, shallowXml(tmpDir));
+    return [{ name: archiveBaseName, files, imageCount: images.length, parentName: archiveParentDir, isSplit: false }];
   }
 
   // Case B: exactly one subdir, no loose files
@@ -426,38 +486,46 @@ function buildGroups(tmpDir, archiveBaseName, archiveParentDir) {
         // avoid filename collisions when pages are numbered per-chapter (001, 002…)
         const groups = [];
         for (const innerSub of inner.subdirs) {
-          const files = deepImages(innerSub.dir);
-          if (files.length > 0) {
-            groups.push({ name: innerSub.name, files, parentName: archiveBaseName, isSplit: true });
+          const images = deepImages(innerSub.dir);
+          if (images.length > 0) {
+            const files = mergeWithXml(images, deepXml(innerSub.dir));
+            groups.push({ name: innerSub.name, files, imageCount: images.length, parentName: archiveBaseName, isSplit: true });
           }
         }
         if (inner.loose.length > 0) {
-          groups.push({ name: archiveBaseName, files: inner.loose, parentName: archiveParentDir, isSplit: false });
+          const xmlAtRoot = shallowXml(sub.dir);
+          const files = mergeWithXml(inner.loose, xmlAtRoot);
+          groups.push({ name: archiveBaseName, files, imageCount: inner.loose.length, parentName: archiveParentDir, isSplit: false });
         }
         if (groups.length > 0) return groups;
       }
       // Truly flat inside the wrapper — single CBZ named after the archive
-      const files = deepImages(sub.dir);
-      if (files.length === 0) return [];
-      return [{ name: archiveBaseName, files, parentName: archiveParentDir, isSplit: false }];
+      const images = deepImages(sub.dir);
+      if (images.length === 0) return [];
+      const files = mergeWithXml(images, deepXml(sub.dir));
+      return [{ name: archiveBaseName, files, imageCount: images.length, parentName: archiveParentDir, isSplit: false }];
     }
     // Genuine single subdir (e.g. only "Chapter 01" inside)
-    const files = deepImages(sub.dir);
-    if (files.length === 0) return [];
-    return [{ name: sub.name, files, parentName: archiveBaseName, isSplit: true }];
+    const images = deepImages(sub.dir);
+    if (images.length === 0) return [];
+    const files = mergeWithXml(images, deepXml(sub.dir));
+    return [{ name: sub.name, files, imageCount: images.length, parentName: archiveBaseName, isSplit: true }];
   }
 
   // Case C: multiple subdirs → one CBZ per subdir + one for loose files
   const groups = [];
   for (const sub of subdirs) {
-    const files = deepImages(sub.dir);
-    if (files.length > 0) {
-      groups.push({ name: sub.name, files, parentName: archiveBaseName, isSplit: true });
+    const images = deepImages(sub.dir);
+    if (images.length > 0) {
+      const files = mergeWithXml(images, deepXml(sub.dir));
+      groups.push({ name: sub.name, files, imageCount: images.length, parentName: archiveBaseName, isSplit: true });
     }
   }
   if (loose.length > 0) {
     // Loose files at root get their own CBZ named after the archive
-    groups.push({ name: archiveBaseName, files: loose, parentName: archiveParentDir, isSplit: false });
+    const xmlAtRoot = shallowXml(tmpDir);
+    const files = mergeWithXml(loose, xmlAtRoot);
+    groups.push({ name: archiveBaseName, files, imageCount: loose.length, parentName: archiveParentDir, isSplit: false });
   }
   return groups;
 }
@@ -512,7 +580,7 @@ function isComplexStructure(dir) {
  *   Non-leaf dir   → mkdir outDir/<name>, recurse
  *   Loose images   → pack to outDir/<path.basename(outDir)>.cbz
  */
-async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
+async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIfPaused = null) {
   let entries;
   try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return []; }
 
@@ -544,7 +612,7 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
       }
     } else {
       log(`  Converting: ${base}`, 'info');
-      const result = await processFile(archive, isManga, log, signal, outDir);
+      const result = await processFile(archive, isManga, log, signal, outDir, waitIfPaused);
       if (result.success && result.outputs) outputs.push(...result.outputs);
     }
   }
@@ -574,8 +642,12 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
       if (fs.existsSync(cbzPath)) {
         log(`  SKIP (exists): ${sub.name}.cbz`, 'skip');
       } else {
+        const subXml    = subEntries
+          .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.xml')
+          .map((e) => path.join(subSrc, e.name));
+        const subToPack = [...subImages, ...subXml];
         log(`  Packing → ${sub.name}.cbz  (${subImages.length} images)`, 'info');
-        await packToCbz(subImages, cbzPath, signal);
+        await packToCbz(subToPack, cbzPath, signal);
         const v = await validateCbz(cbzPath, subImages.length);
         if (v.valid) {
           log(`  ✓ Valid: ${sub.name}.cbz`, 'success');
@@ -589,15 +661,15 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
       // Intermediate folder — create matching output subdir and recurse
       const subOut = path.join(outDir, sub.name);
       fs.mkdirSync(subOut, { recursive: true });
-      const subOutputs = await processDirectoryTree(subSrc, subOut, isManga, log, signal);
+      const subOutputs = await processDirectoryTree(subSrc, subOut, isManga, log, signal, waitIfPaused);
       outputs.push(...subOutputs);
     }
   }
 
   // ── Loose images alongside subdirs or archives ──────────────────────────
   if (images.length > 0) {
-    const looseName = path.basename(outDir);
-    const cbzPath   = path.join(outDir, `${looseName}.cbz`);
+    const looseName  = path.basename(outDir);
+    const cbzPath    = path.join(outDir, `${looseName}.cbz`);
     if (fs.existsSync(cbzPath) && !(await canOpenCbz(cbzPath))) {
       log(`  WARN: Existing ${looseName}.cbz is unreadable — re-converting…`, 'warn');
       try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
@@ -605,8 +677,12 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal) {
     if (fs.existsSync(cbzPath)) {
       log(`  SKIP (exists): ${looseName}.cbz`, 'skip');
     } else {
+      const looseXml  = entries
+        .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.xml')
+        .map((e) => path.join(srcDir, e.name));
+      const toPack = [...images, ...looseXml];
       log(`  Packing loose images → ${looseName}.cbz  (${images.length} images)`, 'info');
-      await packToCbz(images, cbzPath, signal);
+      await packToCbz(toPack, cbzPath, signal);
       const v = await validateCbz(cbzPath, images.length);
       if (v.valid) {
         log(`  ✓ Valid: ${looseName}.cbz`, 'success');
@@ -659,7 +735,7 @@ async function packToCbz(imageFiles, outputPath, signal) {
 // ─── Core per-file processor ─────────────────────────────────────────────────
 
 // outputDir is used when processing nested archives so outputs land next to the outer archive.
-async function processFile(srcFile, isManga, log, signal, outputDir = null) {
+async function processFile(srcFile, isManga, log, signal, outputDir = null, waitIfPaused = null) {
   const ext    = path.extname(srcFile).toLowerCase();
   const srcDir = path.dirname(srcFile);
   const outDir = outputDir ?? srcDir;
@@ -734,10 +810,19 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
       }
     } else {
       log('  Extracting archive…', 'info');
-      await extractArchive(srcFile, tmpDir, signal);
+      const corruptPages = await extractArchive(srcFile, tmpDir, signal);
+      if (corruptPages.length > 0) {
+        log(`  WARNING: ${corruptPages.length} page(s) had CRC errors and were skipped: ${corruptPages.join(', ')}`, 'warn');
+      }
     }
 
     if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+
+    // Pause checkpoint — extraction can take minutes for large archives.
+    // Checking here (after extract, before pack) means pause takes effect
+    // as soon as the current extract step finishes rather than waiting for
+    // the entire file including packing and validation to complete.
+    if (waitIfPaused) await waitIfPaused(signal);
 
     // 2. Determine structure type and route accordingly.
     //    Complex (archives at any level, or subdirs containing further subdirs):
@@ -750,7 +835,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
       const wrapperOutDir = path.join(outDir, baseName);
       fs.mkdirSync(wrapperOutDir, { recursive: true });
       log(`  Hierarchical structure — processing into ${baseName}/`, 'info');
-      const outputs = await processDirectoryTree(contentDir, wrapperOutDir, isManga, log, signal);
+      const outputs = await processDirectoryTree(contentDir, wrapperOutDir, isManga, log, signal, waitIfPaused);
       if (outputs.length === 0) {
         log('  WARNING: No output produced from hierarchical archive', 'warn');
         return { success: false, outcome: 'noImages', isPdf, pdfPages };
@@ -794,11 +879,12 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
         try { fs.unlinkSync(outputPath); } catch { /* ignore */ }
       }
 
-      log(`  Packing → ${outputName}.cbz  (${group.files.length} images)`, 'info');
+      const imageCount = group.imageCount ?? group.files.length;
+      log(`  Packing → ${outputName}.cbz  (${imageCount} images)`, 'info');
       await packToCbz(group.files, outputPath, signal);
 
       // 5. Validate
-      const validation = await validateCbz(outputPath, group.files.length);
+      const validation = await validateCbz(outputPath, imageCount);
       if (!validation.valid) {
         log(`  ERROR: Validation failed — ${validation.reason}`, 'error');
         try { fs.unlinkSync(outputPath); } catch { /* ignore */ }
@@ -819,258 +905,6 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null) {
   }
 }
 
-// ─── Reorganise scattered multi-chapter CBZs ─────────────────────────────────
-
-/**
- * Walk rootDir and reorganize scattered multi-chapter CBZs and cross-language
- * duplicates into named subfolders.
- *
- * Two passes per directory:
- *
- * Pass 1 — split-output grouping:
- *   CBZs sharing the same prefix before their first " - " separator are moved
- *   into  <dir>/<prefix>/.  Works even if the original archive is gone.
- *   Example: "[ENG] Adventure Kid - vol.1.cbz" + "vol.2.cbz"
- *            → "[ENG] Adventure Kid\" folder
- *
- * Pass 2 — cross-language / tag grouping:
- *   CBZ files AND subdirectories are grouped by their "core title" (leading
- *   [LANG]/[TAG] brackets stripped).  Items whose core titles share a
- *   word-prefix are moved into a tag-free folder named after the shortest
- *   core title in the group.
- *   Example: "[ENG] Urotsukidoji\" folder + "[RUS] Urotsukidoji vol01.cbz"
- *            → "Urotsukidoji\" folder containing both
- */
-async function reorganizeScatteredCbzs(rootDir, log) {
-  let moved = 0;
-
-  function stripTags(name) {
-    return name.replace(/^\s*(\[[^\]]*\]\s*)+/, '').trim();
-  }
-
-  function wordsOf(str) {
-    return str.toLowerCase().replace(/[-_]/g, ' ').split(/\s+/).filter(Boolean);
-  }
-
-  // Like wordsOf but preserves original capitalisation — used for folder name reconstruction
-  function tokensOf(str) {
-    return str.replace(/[-_]/g, ' ').split(/\s+/).filter(Boolean);
-  }
-
-  function commonPrefixLen(aw, bw) {
-    let n = 0;
-    while (n < aw.length && n < bw.length && aw[n] === bw[n]) n++;
-    return n;
-  }
-
-  // Remove trailing tokens that leave parentheses or square brackets unclosed,
-  // AND trailing tokens whose only role is to close a bracket opened earlier
-  // (e.g. "02)" with no matching "(" in the same token).
-  // Examples:
-  //   ["Series","Name","(Chapters"]   → ["Series","Name"]
-  //   ["Batman","(Vol","1)","Issue"]  → ["Batman"] (strips "Issue","1)","(Vol")
-  //   ["Korokoro","Soushi","(v01","02)","[eng]"] → unchanged (balanced)
-  function cleanPrefixTokens(tokens) {
-    function balance(toks) {
-      let p = 0, s = 0;
-      for (const t of toks) {
-        p += (t.match(/\(/g) || []).length - (t.match(/\)/g) || []).length;
-        s += (t.match(/\[/g) || []).length - (t.match(/\]/g) || []).length;
-      }
-      return { p, s };
-    }
-    const result = [...tokens];
-    let { p, s } = balance(result);
-    // Strip tokens from the end until parentheses are balanced
-    while (result.length > 0 && (p !== 0 || s !== 0)) {
-      const t = result.pop();
-      p -= (t.match(/\(/g) || []).length - (t.match(/\)/g) || []).length;
-      s -= (t.match(/\[/g) || []).length - (t.match(/\]/g) || []).length;
-    }
-    return result;
-  }
-
-  function moveItem(src, dst, isDir, label, folderName) {
-    if (fs.existsSync(dst)) {
-      if (!isDir) { try { fs.unlinkSync(src); } catch { /* ignore */ } }
-      return;
-    }
-    try {
-      fs.renameSync(src, dst);
-      log(`  Moved: ${label}  →  ${folderName}\\`, 'info');
-      moved++;
-    } catch (err) {
-      if (!isDir && err.code === 'EXDEV') {
-        try { fs.copyFileSync(src, dst); fs.unlinkSync(src); moved++; } catch { /* ignore */ }
-      }
-    }
-  }
-
-  async function walk(dir) {
-    await new Promise((r) => setImmediate(r)); // yield so IPC messages can be processed
-    // ── Pass 0: flatten self-nesting caused by previous buggy runs ───────────
-    // Catches both exact-name repeats ([ENG] X / [ENG] X) and normalisation
-    // variants (v01 02 / v01-02 — hyphens vs spaces treated as equivalent).
-    const dirWords0 = wordsOf(path.basename(dir));
-    try {
-      // Find a same-named subdirectory among dir's children (even if other siblings exist)
-      const d0 = fs.readdirSync(dir, { withFileTypes: true });
-      const sameNameChild = d0.find(
-        (e) => e.isDirectory() && wordsOf(e.name).join(' ') === dirWords0.join(' ')
-      );
-      if (sameNameChild) {
-        // Walk from that child to the deepest same-named single-child chain
-        let deepest = path.join(dir, sameNameChild.name);
-        while (true) {
-          let dd;
-          try { dd = fs.readdirSync(deepest, { withFileTypes: true }); } catch { break; }
-          if (dd.length !== 1 || !dd[0].isDirectory()) break;
-          if (wordsOf(dd[0].name).join(' ') !== dirWords0.join(' ')) break;
-          deepest = path.join(deepest, dd[0].name);
-        }
-        // Move deepest's contents directly into dir
-        let contentEntries;
-        try { contentEntries = fs.readdirSync(deepest, { withFileTypes: true }); } catch { contentEntries = []; }
-        for (const ce of contentEntries) {
-          const src = path.join(deepest, ce.name);
-          const dst = path.join(dir, ce.name);
-          if (!fs.existsSync(dst)) {
-            try {
-              fs.renameSync(src, dst);
-              log(`  Flattened: ${ce.name}  →  ${path.basename(dir)}\\`, 'info');
-              moved++;
-            } catch { /* ignore */ }
-          }
-        }
-        // Delete the now-empty intermediate chain upward to (but not including) dir
-        let toDelete = deepest;
-        while (path.resolve(toDelete) !== path.resolve(dir)) {
-          try { fs.rmdirSync(toDelete); } catch { break; }
-          toDelete = path.dirname(toDelete);
-        }
-      }
-    } catch { /* ignore */ }
-
-    let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-
-    // Names containing "Art of" / "The Art of" are excluded from all grouping.
-    const ART_OF_RE = /\b(art|encyclopedia|world)\s+of\b|\bthe\s+(art|encyclopedia|world)\b/i;
-    const artOfTest = (s) => ART_OF_RE.test(s.replace(/[_-]/g, ' '));
-
-    // ── Pass 1: group CBZs by prefix before ' - ' ─────────────────────────
-    const cbzFiles = entries
-      .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.cbz')
-      .map((e) => e.name);
-
-    const p1Groups = new Map();
-    for (const cbz of cbzFiles) {
-      const base   = path.basename(cbz, '.cbz');
-      if (artOfTest(base)) continue;
-      const sepIdx = base.indexOf(' - ');
-      if (sepIdx === -1) continue;
-      const prefix = base.slice(0, sepIdx);
-      // Guard: skip if prefix words are a prefix of (or equal to) the current dir name words.
-      // Uses wordsOf so "v01-02" and "v01 02" are treated as identical.
-      const prefixWords1 = wordsOf(prefix);
-      const dirWords1    = wordsOf(path.basename(dir));
-      if (commonPrefixLen(prefixWords1, dirWords1) >= prefixWords1.length) continue;
-      if (!p1Groups.has(prefix)) p1Groups.set(prefix, []);
-      p1Groups.get(prefix).push(cbz);
-    }
-
-    for (const [prefix, list] of p1Groups) {
-      if (list.length < 2) continue;
-      const destDir = path.join(dir, prefix);
-      try { fs.mkdirSync(destDir, { recursive: true }); } catch { continue; }
-      for (const cbz of list) {
-        moveItem(path.join(dir, cbz), path.join(destDir, cbz), false, cbz, prefix);
-      }
-    }
-
-    // ── Pass 2: group CBZs + folders by shared word prefix ────────────────
-    // Handles [LANG] variants (Case 1-2) AND subtitle/spin-off variations (Case 3-4).
-    // Match rule: items share ≥2 common leading words, OR one name is a full word-prefix
-    // of the other (e.g. "Batman" fully inside "Batman Beyond" → match on 1 word).
-    let entries2;
-    try { entries2 = fs.readdirSync(dir, { withFileTypes: true }); } catch { entries2 = []; }
-
-    const items = entries2
-      .filter((e) => (e.isFile() && path.extname(e.name).toLowerCase() === '.cbz') || e.isDirectory())
-      .map((e) => {
-        const base     = e.isDirectory() ? e.name : path.basename(e.name, '.cbz');
-        const stripped = stripTags(base);
-        const words    = wordsOf(stripped);
-        const tokens   = tokensOf(stripped);
-        return { name: e.name, isDir: e.isDirectory(), stripped, words, tokens };
-      })
-      .filter((e) => e.words.length > 0 && !artOfTest(e.stripped));
-
-    // Build groups; track prefixWords (lowercase) + prefixTokens (original case) per group
-    const p2Groups = []; // [{ prefixWords, prefixTokens, items[] }]
-    for (const item of items) {
-      let bestGroup = null;
-      let bestLen   = 0;
-
-      for (const grp of p2Groups) {
-        const cp = commonPrefixLen(grp.prefixWords, item.words);
-        // qualifies if one name is entirely a prefix of the other, OR ≥2 words shared
-        const qualifies = cp > 0 && (cp >= grp.prefixWords.length || cp >= item.words.length || cp >= 2);
-        if (qualifies && cp > bestLen) { bestGroup = grp; bestLen = cp; }
-      }
-
-      if (bestGroup) {
-        bestGroup.items.push(item);
-        // Narrow the stored prefix to the actual common prefix
-        bestGroup.prefixWords  = bestGroup.prefixWords.slice(0, bestLen);
-        bestGroup.prefixTokens = bestGroup.prefixTokens.slice(0, bestLen);
-      } else {
-        p2Groups.push({ prefixWords: [...item.words], prefixTokens: [...item.tokens], items: [item] });
-      }
-    }
-
-    for (const { prefixTokens, items: grpItems } of p2Groups) {
-      if (grpItems.length < 2) continue;
-
-      // Clean prefix: strip trailing tokens that leave unclosed parentheses/brackets,
-      // e.g. "Batman (Vol" → "Batman", "Series (Chapters" → "Series"
-      const folderName = cleanPrefixTokens([...prefixTokens]).join(' ');
-      if (!folderName || folderName.length < 2) continue;
-
-      // Guard: skip if current dir name (normalised) is a prefix of or equals the group folder name.
-      // Catches exact matches, tag variants ([ENG] X inside X), and sub-grouping (X inside X Vol).
-      const dirWords2 = wordsOf(stripTags(path.basename(dir)));
-      const fnWords2  = wordsOf(folderName);
-      if (commonPrefixLen(dirWords2, fnWords2) >= dirWords2.length) continue;
-
-      // If a folder matching the group name already exists (case-insensitive), use it as the
-      // container — can't move a folder inside itself, so it stays and others move into it.
-      const containerItem = grpItems.find((i) => i.isDir && i.name.toLowerCase() === folderName.toLowerCase());
-      const actualFolder  = containerItem ? containerItem.name : folderName;
-      const toMove = containerItem ? grpItems.filter((i) => i !== containerItem) : grpItems;
-      if (toMove.length === 0) continue;
-
-      const destDir = path.join(dir, actualFolder);
-      try { fs.mkdirSync(destDir, { recursive: true }); } catch { continue; }
-
-      for (const item of toMove) {
-        const src = path.join(dir, item.name);
-        if (!fs.existsSync(src)) continue; // may have been moved by Pass 1
-        moveItem(src, path.join(destDir, item.name), item.isDir, item.name, actualFolder);
-      }
-    }
-
-    // Recurse into subdirs (re-read for updated state after both passes)
-    let entries3;
-    try { entries3 = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries3.filter((e) => e.isDirectory())) {
-      await walk(path.join(dir, e.name));
-    }
-  }
-
-  await walk(rootDir);
-  return moved;
-}
 
 // ─── Orphan detection ────────────────────────────────────────────────────────
 
@@ -1090,33 +924,42 @@ async function findOrphanedOriginals(rootDir) {
   const simple      = [];
   const needsReview = [];
 
+  // Normalise a filename stem for pre-existing match: lowercase, ensure a space
+  // between adjacent parenthetical groups, collapse whitespace runs.
+  // "Batman (2023)(Digital Rip)" → "batman (2023) (digital rip)"
+  const normaliseForMatch = (s) =>
+    s.toLowerCase().replace(/\)\s*\(/g, ') (').replace(/\s+/g, ' ').trim();
+
   async function walk(dir) {
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
 
-    // Collect files in this directory by extension
-    const byExt = { src: [], cbzNames: [], cbzBaseSet: new Set() };
+    // Collect files in this directory by extension.
+    // cbzByNorm maps a normalised stem → actual CBZ filename, so we can find the
+    // real file even when casing or spacing differs (e.g. "(Rip)(DCP)" vs "(Rip) (DCP)").
+    const byExt = { src: [], cbzNames: [], cbzByNorm: new Map() };
     for (const e of entries) {
       if (!e.isFile()) continue;
       const ext = path.extname(e.name).toLowerCase();
       if (ext === '.cbz') {
         byExt.cbzNames.push(e.name);
-        byExt.cbzBaseSet.add(path.basename(e.name, '.cbz').toLowerCase());
+        byExt.cbzByNorm.set(normaliseForMatch(path.basename(e.name, '.cbz')), e.name);
       } else if (CONVERTIBLE_EXTS.has(ext)) {
         byExt.src.push(e.name);
       }
     }
 
     for (const name of byExt.src) {
-      const base = path.basename(name, path.extname(name)).toLowerCase();
-      const full = path.join(dir, name);
-      if (byExt.cbzBaseSet.has(base)) {
-        // Exact match: Batman.cbr + Batman.cbz → safe to flag only if CBZ is readable
-        const cbzPath = path.join(dir, path.basename(name, path.extname(name)) + '.cbz');
+      const base    = normaliseForMatch(path.basename(name, path.extname(name)));
+      const full    = path.join(dir, name);
+      const cbzName = byExt.cbzByNorm.get(base); // actual CBZ filename (may differ in spacing)
+      if (cbzName) {
+        // Normalised match: source + matching CBZ → safe to flag only if CBZ is readable
+        const cbzPath = path.join(dir, cbzName);
         if (!(await canOpenCbz(cbzPath))) continue; // corrupted CBZ — leave both files alone
         simple.push(full);
       } else if (byExt.cbzNames.length > 0) {
-        // CBZ files exist in this folder but no name match →
+        // CBZ files exist in this folder but no normalised match →
         // could be a collection archive or split archive that wasn't cleaned up
         needsReview.push({
           file: full,
@@ -1188,14 +1031,6 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
 
   log(`Scanning: ${rootFolder}`, 'header');
 
-  // Reorganize scattered multi-chapter CBZs first, before converting.
-  // Runs even when there are no archives to convert — just select the folder
-  // and click Start Conversion to reorganize CBZ-only folders.
-  const preReorganized = await reorganizeScatteredCbzs(rootFolder, log);
-  if (preReorganized > 0) {
-    log(`Reorganized ${preReorganized} CBZ(s) into subfolders.\n`, 'info');
-  }
-
   const files = await scanForFiles(rootFolder);
 
   if (files.length === 0) {
@@ -1227,7 +1062,7 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
     log(`[${i + 1}/${files.length}] ${path.relative(rootFolder, file)}`, 'header');
 
     try {
-      const result = await processFile(file, isManga, log, signal);
+      const result = await processFile(file, isManga, log, signal, null, waitIfPaused);
       if (result.success) {
         converted.push(file);
         for (const cbzPath of (result.outputs || [])) {
@@ -1275,8 +1110,8 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
   return { converted, preExisting: uniquePreExisting, needsReview, totalCbzBytes };
 }
 
-async function convertSingleFile(filePath, isManga, log, signal) {
-  return processFile(filePath, isManga, log, signal);
+async function convertSingleFile(filePath, isManga, log, signal, waitIfPaused = null) {
+  return processFile(filePath, isManga, log, signal, null, waitIfPaused);
 }
 
 module.exports = { startConversion, convertSingleFile };

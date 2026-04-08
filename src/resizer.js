@@ -10,6 +10,10 @@ const { getSevenZip, getImageMagick } = require('./tools');
 const { validateCbz }                 = require('./validator');
 
 const IMAGE_EXTS    = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif']);
+// 7-Zip include-filter args — extract only image files so that non-image
+// entries (PDFs, config dirs, etc.) inside CBZs are never touched and
+// never cause "Cannot create folder" conflicts.
+const IMAGE_INCLUDE_ARGS = [...IMAGE_EXTS].map((ext) => `-i!*${ext}`);
 const MAX_LONG_SIDE = 4500;
 const QUALITY       = 90;
 const BATCH_SIZE    = 50;
@@ -18,6 +22,16 @@ const BATCH_SIZE    = 50;
 const CONCURRENCY   = Math.min(os.cpus().length, 4);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// On Windows, prepend \\?\ to absolute paths so child processes (7-Zip, etc.)
+// can accept paths longer than the default 260-character MAX_PATH limit.
+// The \\?\ prefix bypasses MAX_PATH regardless of whether "Enable Long Paths"
+// is enabled in Windows settings.
+function longPath(p) {
+  if (process.platform !== 'win32' || !path.isAbsolute(p)) return p;
+  if (p.startsWith('\\\\')) return p; // already UNC or \\?\
+  return '\\\\?\\' + path.normalize(p);
+}
 
 function execFilePromise(cmd, args, signal, execOpts = {}) {
   return new Promise((resolve, reject) => {
@@ -223,13 +237,36 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
 
         const originalSize = fs.statSync(cbzPath).size;
 
-        // 1. Extract flat (no subdirs) into tmpDir
-        await execFilePromise(sevenZip, ['e', cbzPath, `-o${tmpDir}`, '-y'], signal);
+        // 1. Extract flat (no subdirs) into tmpDir, images only.
+        //    • longPath() adds \\?\ so 7-Zip can open CBZs whose full path
+        //      exceeds the Windows 260-character MAX_PATH limit.
+        //    • IMAGE_INCLUDE_ARGS restrict extraction to image extensions so
+        //      non-image entries (e.g. a "config" directory) are never
+        //      processed and never cause "Cannot create folder" conflicts.
+        //    • 7-Zip exit code 1 = warnings only (e.g. "Unexpected end of
+        //      archive" on a truncated file).  We log it and continue with
+        //      whatever pages were extracted rather than aborting the file.
+        try {
+          await execFilePromise(
+            sevenZip,
+            ['e', longPath(cbzPath), `-o${longPath(tmpDir)}`, '-y', ...IMAGE_INCLUDE_ARGS, '-i!*.xml', '-i!*.XML'],
+            signal
+          );
+        } catch (err) {
+          if (err.name === 'AbortError' || signal?.aborted) throw err;
+          if (err.code !== 1) throw err; // code 1 = non-fatal warnings — continue
+          log(`Archive warning: ${(err.stderr?.trim() || err.message).split('\n')[0]}`, 'warn');
+        }
 
         // 2. Collect image files, sorted for correct page order
         const allFiles = fs.readdirSync(tmpDir)
           .filter((f) => IMAGE_EXTS.has(path.extname(f).toLowerCase()))
           .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+          .map((f) => path.join(tmpDir, f));
+
+        // Also collect any XML metadata files (e.g. ComicInfo.xml)
+        const xmlFiles = fs.readdirSync(tmpDir)
+          .filter((f) => path.extname(f).toLowerCase() === '.xml')
           .map((f) => path.join(tmpDir, f));
 
         if (allFiles.length === 0) {
@@ -263,21 +300,25 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         log(`${oversized.length} / ${allFiles.length} page(s) exceed ${MAX_LONG_SIDE}px — resizing…`, 'info');
 
         // 4. Mogrify oversized pages in-place (never upscales — ">" flag).
+        //    Use basenames + cwd so the command line never contains long image
+        //    paths (internal CBZ filenames can also exceed MAX_PATH when joined
+        //    with a temp dir prefix).
         //    Batch into groups of BATCH_SIZE to stay under the Windows
         //    32 767-character command-line limit for large artbooks.
         for (let b = 0; b < oversized.length; b += BATCH_SIZE) {
           if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
-          const batch = oversized.slice(b, b + BATCH_SIZE);
+          const batch = oversized.slice(b, b + BATCH_SIZE).map((f) => path.basename(f));
           await execFilePromise(
             imageMagick,
             ['mogrify', '-resize', `${MAX_LONG_SIDE}x${MAX_LONG_SIDE}>`, '-quality', String(QUALITY), ...batch],
-            signal
+            signal,
+            { cwd: tmpDir }
           );
         }
 
-        // 5. Pack all pages into a new temp CBZ via 7-Zip store mode
+        // 5. Pack all pages (+ any XML metadata files) into a new temp CBZ via 7-Zip store mode
         tmpCbz = path.join(os.tmpdir(), `cbz_resized_${crypto.randomBytes(6).toString('hex')}.cbz`);
-        const basenames = allFiles.map((f) => path.basename(f));
+        const basenames = [...allFiles, ...xmlFiles].map((f) => path.basename(f));
         const listPath  = path.join(tmpDir, '.cbzpack.lst');
         fs.writeFileSync(listPath, basenames.join('\n'), 'utf8');
         try {
