@@ -115,7 +115,7 @@
 .app-header::after {
   content: 'NIGHT CITY  ///  CORPO PLAZA  //  JACKED IN';
   position: absolute;
-  right: 140px;
+  left: 380px;
   top: 50%;
   transform: translateY(-50%);
   font-size: 8px;

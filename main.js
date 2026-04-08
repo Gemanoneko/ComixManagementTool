@@ -104,6 +104,28 @@ app.on('before-quit', () => {
 // App version
 ipcMain.handle('app:version', () => app.getVersion());
 
+// ── Persistent settings (JSON file in userData) ──────────────────────────────
+const settingsPath = path.join(app.getPath('userData'), 'settings.json');
+
+function readSettings() {
+  try { return JSON.parse(fs.readFileSync(settingsPath, 'utf-8')); }
+  catch { return {}; }
+}
+
+function writeSettings(data) {
+  fs.writeFileSync(settingsPath, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+ipcMain.handle('settings:get', (event, key) => {
+  return readSettings()[key] ?? null;
+});
+
+ipcMain.handle('settings:set', (event, key, value) => {
+  const s = readSettings();
+  s[key] = value;
+  writeSettings(s);
+});
+
 // Open folder picker dialog
 ipcMain.handle('dialog:openFolder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {

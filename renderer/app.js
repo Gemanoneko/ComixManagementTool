@@ -177,12 +177,15 @@ function applyTheme(themeId) {
   } else {
     themeStylesheet.removeAttribute('href');
   }
-  localStorage.setItem('comix-theme', themeId || '');
+  electron.invoke('settings:set', 'theme', themeId || '');
 }
 
-const savedTheme = localStorage.getItem('comix-theme') || '';
-themePicker.value = savedTheme;
-applyTheme(savedTheme);
+// Restore saved theme on load
+electron.invoke('settings:get', 'theme').then((saved) => {
+  const themeId = saved || '';
+  themePicker.value = themeId;
+  if (themeId) themeStylesheet.href = `themes/${themeId}.css`;
+});
 
 themePicker.addEventListener('change', () => applyTheme(themePicker.value));
 
