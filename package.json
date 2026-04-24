@@ -1,12 +1,13 @@
 {
   "name": "comix-management-tool",
-  "version": "1.9.2",
+  "version": "1.9.3",
   "description": "Comic archive conversion and management tool",
   "main": "main.js",
   "scripts": {
     "start":          "electron .",
     "prepare-vendor": "node scripts/prepare-vendor.js",
     "build":          "electron-builder --win --publish always",
+    "release":        "node scripts/release.mjs",
     "postbuild":      "node scripts/cleanup-releases.js",
     "pack":           "electron-builder --win --publish never",
     "dist":           "electron-builder --win --publish never && node scripts/stamp-icon.js"
