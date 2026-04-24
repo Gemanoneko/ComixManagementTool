@@ -17,6 +17,13 @@ vendor/
 builder-debug.yml
 builder-effective-config.yaml
 
+# electron-builder cached binaries (downloaded on demand, not source)
+scripts/rcedit-x64.exe
+scripts/winCodeSign-*.7z
+
+# One-off icon source (icon.ico is the shipping asset)
+/comic.png
+
 # OS
 .DS_Store
 Thumbs.db
