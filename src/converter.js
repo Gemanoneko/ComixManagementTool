@@ -647,14 +647,16 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
           .map((e) => path.join(subSrc, e.name));
         const subToPack = [...subImages, ...subXml];
         log(`  Packing → ${sub.name}.cbz  (${subImages.length} images)`, 'info');
-        await packToCbz(subToPack, cbzPath, signal);
-        const v = await validateCbz(cbzPath, subImages.length);
+        const tmpPath = await packToCbz(subToPack, cbzPath, signal);
+        const v = await validateCbz(tmpPath, subImages.length);
         if (v.valid) {
+          // Validation passed — promote the .tmp to the final .cbz atomically.
+          await fs.promises.rename(tmpPath, cbzPath);
           log(`  ✓ Valid: ${sub.name}.cbz`, 'success');
           outputs.push(cbzPath);
         } else {
           log(`  ERROR: ${v.reason}`, 'error');
-          try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
+          try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
         }
       }
     } else {
@@ -682,14 +684,16 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
         .map((e) => path.join(srcDir, e.name));
       const toPack = [...images, ...looseXml];
       log(`  Packing loose images → ${looseName}.cbz  (${images.length} images)`, 'info');
-      await packToCbz(toPack, cbzPath, signal);
-      const v = await validateCbz(cbzPath, images.length);
+      const tmpPath = await packToCbz(toPack, cbzPath, signal);
+      const v = await validateCbz(tmpPath, images.length);
       if (v.valid) {
+        // Validation passed — promote the .tmp to the final .cbz atomically.
+        await fs.promises.rename(tmpPath, cbzPath);
         log(`  ✓ Valid: ${looseName}.cbz`, 'success');
         outputs.push(cbzPath);
       } else {
         log(`  ERROR: ${v.reason}`, 'error');
-        try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
       }
     }
   }
@@ -703,6 +707,14 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
  * Pack an array of image file paths into a CBZ (flat ZIP, no internal folder).
  * Uses 7-Zip in store mode so images are never loaded into Node.js RAM.
  * Image files are stored with natural-sort ordering by filename.
+ *
+ * Packs to `<outputPath>.tmp` — caller is responsible for validating and then
+ * fs.rename-ing the .tmp to the final outputPath. This makes the on-disk state
+ * self-describing: a final .cbz exists only if validation passed. A crash or
+ * abort leaves an orphan .cbz.tmp (never matched by the .cbz extension filters)
+ * that the next run ignores, so the source is safely re-processed.
+ *
+ * Returns the tmp path that was written.
  */
 async function packToCbz(imageFiles, outputPath, signal) {
   const sevenZip = getSevenZip();
@@ -712,24 +724,28 @@ async function packToCbz(imageFiles, outputPath, signal) {
   // List file lives inside the temp dir (srcDir is always inside cbz_* tmpDir)
   // so it is auto-removed by removeTempDir and by the startup orphan cleanup.
   const listPath = path.join(srcDir, '.cbzpack.lst');
+  const tmpOutputPath = outputPath + '.tmp';
   fs.writeFileSync(listPath, basenames.join('\n'), 'utf8');
+  // If a stale .tmp already exists from a prior crash/abort, remove it so
+  // 7-Zip doesn't try to append to it (it creates-or-updates by default).
+  try { fs.unlinkSync(tmpOutputPath); } catch { /* ignore — may not exist */ }
   try {
     // -tzip: ZIP container  -mx=0: store (images are already compressed)
     // cwd=srcDir: 7-Zip adds files by basename → no directory prefix in archive
     await execFilePromise(
       sevenZip,
-      ['a', '-tzip', '-mx=0', outputPath, `@${listPath}`],
+      ['a', '-tzip', '-mx=0', tmpOutputPath, `@${listPath}`],
       signal,
       { cwd: srcDir },
     );
   } catch (err) {
-    // Delete any partial output so the next run doesn't find a half-written CBZ
-    // and mistakenly treat it as valid (canOpenCbz could return true for it).
-    try { fs.unlinkSync(outputPath); } catch { /* ignore — may not exist yet */ }
+    // Delete any partial .tmp so it doesn't linger as a stale orphan.
+    try { fs.unlinkSync(tmpOutputPath); } catch { /* ignore — may not exist yet */ }
     throw err;
   } finally {
     try { fs.unlinkSync(listPath); } catch { /* ignore */ }
   }
+  return tmpOutputPath;
 }
 
 // ─── Core per-file processor ─────────────────────────────────────────────────
@@ -881,16 +897,20 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
 
       const imageCount = group.imageCount ?? group.files.length;
       log(`  Packing → ${outputName}.cbz  (${imageCount} images)`, 'info');
-      await packToCbz(group.files, outputPath, signal);
+      const tmpPath = await packToCbz(group.files, outputPath, signal);
 
-      // 5. Validate
-      const validation = await validateCbz(outputPath, imageCount);
+      // 5. Validate the .tmp; only on success do we rename to the final .cbz.
+      //    An abort or crash between pack and rename leaves an orphan .cbz.tmp
+      //    (never matched by .cbz extension filters) so the source is safely
+      //    re-processed on the next run and never eligible for deletion.
+      const validation = await validateCbz(tmpPath, imageCount);
       if (!validation.valid) {
         log(`  ERROR: Validation failed — ${validation.reason}`, 'error');
-        try { fs.unlinkSync(outputPath); } catch { /* ignore */ }
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
         return { success: false, outcome: 'validationFailed', reason: validation.reason, isPdf, pdfPages };
       }
 
+      await fs.promises.rename(tmpPath, outputPath);
       log(`  ✓ Valid: ${outputName}.cbz`, 'success');
       outputs.push(outputPath);
     }
