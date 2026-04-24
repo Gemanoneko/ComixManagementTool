@@ -10,21 +10,13 @@
 
 const fs   = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFilePromise } = require('./exec');
+const { sevenZipArgs }    = require('./seven-zip');
 const { getSevenZip } = require('./tools');
 
 const ARCHIVE_ENTRY_EXTS = new Set(['.cbr', '.cbz', '.rar', '.zip']);
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
-
-function execFileAsync(cmd, args, opts = {}) {
-  return new Promise((resolve, reject) => {
-    execFile(cmd, args, { maxBuffer: 64 * 1024 * 1024, ...opts }, (err, stdout, stderr) => {
-      if (err) reject(Object.assign(err, { stderr }));
-      else     resolve({ stdout, stderr });
-    });
-  });
-}
 
 /**
  * Use `7z l -slt` to list entries inside a CBZ.
@@ -34,7 +26,12 @@ async function peekCbz(cbzPath) {
   const sz = getSevenZip();
   if (!sz) return null;
   try {
-    const { stdout } = await execFileAsync(sz, ['l', '-slt', cbzPath]);
+    const { stdout } = await execFilePromise(
+      sz,
+      sevenZipArgs('l', ['-slt'], cbzPath),
+      null,
+      { maxBuffer: 64 * 1024 * 1024 },
+    );
     const lines = stdout.split(/\r?\n/);
     let totalEntries = 0;
     let archiveCount = 0;
@@ -182,11 +179,24 @@ async function applyUnwrap(rootDir, groups, log, sendProgress, signal) {
   for (let i = 0; i < groups.length; i++) {
     if (signal?.aborted) break;
 
-    const { cbzPath, cbzRel, parentDir, baseName } = groups[i];
+    const { cbzPath, cbzRel, parentDir, baseName, previewTarget, previewTargetRel } = groups[i];
 
-    // Re-resolve target folder at apply time in case state changed
-    const targetFolder    = resolveTargetFolder(parentDir, baseName);
-    const targetFolderRel = path.relative(rootDir, targetFolder);
+    // m5: lock the target folder at scan time.  Re-resolving at apply time
+    // could produce a different name than the preview showed the user if a
+    // conflicting folder appeared between scan and apply.  Instead we keep
+    // the previewed path and fail this apply with a clear error on conflict.
+    const targetFolder    = previewTarget;
+    const targetFolderRel = previewTargetRel;
+
+    if (fs.existsSync(targetFolder)) {
+      log(
+        `  Skipped "${cbzRel}": preview target "${targetFolderRel}" was created after scan — rerun to re-resolve.`,
+        'error',
+      );
+      failed++;
+      sendProgress?.(i + 1, total);
+      continue;
+    }
 
     const numbered = path.basename(targetFolder) !== baseName;
     log(
@@ -197,18 +207,26 @@ async function applyUnwrap(rootDir, groups, log, sendProgress, signal) {
     try {
       fs.mkdirSync(targetFolder, { recursive: true });
 
-      await execFileAsync(sz, ['x', cbzPath, `-o${targetFolder}`, '-y'], {
-        windowsHide: true,
-      });
+      await execFilePromise(
+        sz,
+        sevenZipArgs('x', [`-o${targetFolder}`, '-y'], cbzPath),
+        signal,
+        { windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
+      );
 
       log(`  Done: ${targetFolderRel}`, 'success', targetFolder);
       unwrapped++;
       extracted.push({ cbzPath, cbzRel, targetFolder, targetFolderRel });
     } catch (err) {
+      // Clean up partial extraction regardless of cause
+      try { fs.rmSync(targetFolder, { recursive: true, force: true }); } catch {}
+      if (err.name === 'AbortError' || signal?.aborted) {
+        // Let the caller's abort path handle reporting — don't log a scary
+        // "Failed to extract" line for user-initiated cancel.
+        throw err;
+      }
       log(`  Failed to extract "${cbzRel}": ${err.message}`, 'error');
       failed++;
-      // Clean up partial extraction
-      try { fs.rmSync(targetFolder, { recursive: true, force: true }); } catch {}
     }
 
     sendProgress?.(i + 1, total);

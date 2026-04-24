@@ -4,19 +4,23 @@ const fs = require('fs');
 const os = require('os');
 
 /**
- * Delete leftover temp files from previous crashed sessions:
- *   cbz_*    — our own extraction temp directories
- *   magick-* — ImageMagick scratch files (can be 1+ GB each)
+ * Delete leftover temp files from previous crashed sessions.
+ *
+ * Only sweeps items we own (prefix `cbz_`) so we can't accidentally yank
+ * in-flight scratch files from another ImageMagick-using tool running on the
+ * same machine.  ImageMagick's own `magick-*` scratch files are NOT swept —
+ * those belong to whoever spawned them, and a foreground process may still
+ * be actively writing them.
+ *
+ * Swept:
+ *   cbz_*              — our own extraction temp directories (and any file
+ *                        prefixed cbz_, e.g. cbz_resized_*.cbz from resizer)
  */
 function cleanupOrphanedTempDirs() {
   const tmpBase = os.tmpdir();
   try {
     for (const entry of fs.readdirSync(tmpBase, { withFileTypes: true })) {
-      const isCbzDir    = entry.isDirectory() && entry.name.startsWith('cbz_');
-      // cbz_resized_*.cbz — orphaned temp CBZ files from crashed resize sessions
-      const isCbzFile   = entry.isFile()      && entry.name.startsWith('cbz_resized_');
-      const isMagick    = entry.isFile()      && entry.name.startsWith('magick-');
-      if (!isCbzDir && !isCbzFile && !isMagick) continue;
+      if (!entry.name.startsWith('cbz_')) continue;
       try { fs.rmSync(path.join(tmpBase, entry.name), { recursive: true, force: true }); }
       catch { /* ignore locked entries */ }
     }
@@ -70,6 +74,13 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  // Standard Electron hardening — the renderer only loads bundled local files
+  // under a strict CSP, but defence-in-depth: a future regression (DOM-inject,
+  // compromised dep) cannot pivot into navigating the app window to arbitrary
+  // content or opening popup windows with main-world privileges.
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (e) => e.preventDefault());
 }
 
 app.whenReady().then(() => {

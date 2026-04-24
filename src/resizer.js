@@ -1,11 +1,12 @@
 'use strict';
 
-const { execFile } = require('child_process');
 const path   = require('path');
 const fs     = require('fs');
 const os     = require('os');
 const crypto = require('crypto');
 
+const { execFilePromise } = require('./exec');
+const { sevenZipArgs }    = require('./seven-zip');
 const { getSevenZip, getImageMagick } = require('./tools');
 const { validateCbz }                 = require('./validator');
 
@@ -31,22 +32,6 @@ function longPath(p) {
   if (process.platform !== 'win32' || !path.isAbsolute(p)) return p;
   if (p.startsWith('\\\\')) return p; // already UNC or \\?\
   return '\\\\?\\' + path.normalize(p);
-}
-
-function execFilePromise(cmd, args, signal, execOpts = {}) {
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      cmd, args,
-      { maxBuffer: 512 * 1024 * 1024, ...execOpts },
-      (err, stdout, stderr) => {
-        if (err) reject(Object.assign(err, { stderr }));
-        else     resolve({ stdout, stderr });
-      }
-    );
-    if (signal) {
-      signal.addEventListener('abort', () => { try { child.kill(); } catch {} }, { once: true });
-    }
-  });
 }
 
 function formatBytes(bytes) {
@@ -229,11 +214,13 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
 
       log(path.basename(cbzPath), 'header');
 
-      const tmpDir = path.join(os.tmpdir(), `cbz_resize_${crypto.randomBytes(6).toString('hex')}`);
+      // m6: mkdtempSync is atomic and guaranteed unique — matches the
+      // converter.js `cbz_` pattern and removes the manual-randomBytes +
+      // mkdirSync race that could theoretically collide.
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cbz_resize_'));
       let   tmpCbz = null;
 
       try {
-        fs.mkdirSync(tmpDir, { recursive: true });
 
         const originalSize = fs.statSync(cbzPath).size;
 
@@ -249,7 +236,11 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         try {
           await execFilePromise(
             sevenZip,
-            ['e', longPath(cbzPath), `-o${longPath(tmpDir)}`, '-y', ...IMAGE_INCLUDE_ARGS, '-i!*.xml', '-i!*.XML'],
+            sevenZipArgs(
+              'e',
+              [`-o${longPath(tmpDir)}`, '-y', ...IMAGE_INCLUDE_ARGS, '-i!*.xml', '-i!*.XML'],
+              longPath(cbzPath),
+            ),
             signal
           );
         } catch (err) {
@@ -324,7 +315,8 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         try {
           await execFilePromise(
             sevenZip,
-            ['a', '-tzip', '-mx=0', tmpCbz, `@${listPath}`],
+            // `tmpCbz` gets `--` protection; `@listPath` is already safe.
+            sevenZipArgs('a', ['-tzip', '-mx=0'], tmpCbz, `@${listPath}`),
             signal,
             { cwd: tmpDir }
           );

@@ -32,6 +32,7 @@ function walkSync(rootFolder, signal) {
   return files;
 }
 
+// MD5 used for content-equality only, not integrity
 function md5File(filePath) {
   return new Promise((resolve, reject) => {
     const hash   = crypto.createHash('md5');

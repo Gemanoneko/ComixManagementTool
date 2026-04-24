@@ -951,7 +951,10 @@ reviewConvertBtn.addEventListener('click', async () => {
     isManga:  mangaModeEl.checked,
   });
 
-  if (result && result.success) {
+  // Gate delete on the explicit validated flag (not just success) so a future
+  // refactor that flips the shape of processFile's return can't accidentally
+  // start deleting originals for skipped / un-validated outcomes.
+  if (result && result.success && result.validated) {
     const del = await electron.invoke('conversion:deleteOriginals', [item.file]);
     if (del[0].success) appendLog(`  DELETED original: ${item.file}`, 'success');
     else                appendLog(`  FAILED to delete original: ${del[0].error}`, 'error');

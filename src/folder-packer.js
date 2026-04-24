@@ -11,7 +11,8 @@
 
 const fs   = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFilePromise } = require('./exec');
+const { sevenZipArgs }    = require('./seven-zip');
 const { getSevenZip } = require('./tools');
 
 const ARCHIVE_FOLDER_EXTS = new Set(['.cbr', '.cbz', '.rar', '.zip']);
@@ -19,15 +20,6 @@ const IMAGE_EXTS           = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', 
 const ARCHIVE_FILE_EXTS    = new Set(['.cbr', '.cbz', '.rar', '.zip', '.pdf']);
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
-
-function execFileAsync(cmd, args, opts = {}) {
-  return new Promise((resolve, reject) => {
-    execFile(cmd, args, { maxBuffer: 64 * 1024 * 1024, ...opts }, (err, stdout, stderr) => {
-      if (err) reject(Object.assign(err, { stderr }));
-      else     resolve({ stdout, stderr });
-    });
-  });
-}
 
 function naturalSort(a, b) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
@@ -308,7 +300,13 @@ async function packFolder(sz, folderPath, baseName, parentDir, log, signal) {
     const listPath = path.join(job.srcDir, '.cbzpack.lst');
     fs.writeFileSync(listPath, job.basenames.join('\n'), 'utf8');
     try {
-      await execFileAsync(sz, ['a', '-tzip', '-mx=0', targetPath, `@${listPath}`], { cwd: job.srcDir });
+      await execFilePromise(
+        sz,
+        // `targetPath` gets the `--` guard; `@listPath` is already safe.
+        sevenZipArgs('a', ['-tzip', '-mx=0'], targetPath, `@${listPath}`),
+        signal,
+        { cwd: job.srcDir, maxBuffer: 64 * 1024 * 1024 },
+      );
       log(`  Done: ${path.basename(targetPath)}  (${job.basenames.length} file(s))`, 'success', parentDir);
       outputPaths.push(targetPath);
     } catch (err) {

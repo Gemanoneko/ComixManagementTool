@@ -14,6 +14,21 @@ function setupUpdater(win) {
   _win = win;
 
   autoUpdater.autoDownload = false;
+  /*
+   * Deliberately false — do NOT silently install updates on app quit.
+   *
+   * When the user clicks "Download" in the banner, electron-updater fetches
+   * the NSIS installer into `userData/<squirrel cache>`.  If the user then
+   * kills the app without clicking "Install", the installer lingers on disk
+   * until the NEXT download-update replaces it or the user uninstalls.
+   *
+   * Flipping this to `true` would auto-run the installer on quit, which is
+   * convenient but also means (a) the app can't detect the installer is
+   * damaged / partially downloaded before it runs, and (b) the user sees no
+   * progress UI.  The current "banner → explicit click → install" flow
+   * keeps the user in control, at the cost of a stray installer file after
+   * a crash.  Accept that trade-off until silent install is confirmed safe.
+   */
   autoUpdater.autoInstallOnAppQuit = false;
 
   autoUpdater.on('checking-for-update', () => {

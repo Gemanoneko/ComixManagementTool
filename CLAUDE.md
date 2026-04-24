@@ -56,7 +56,9 @@ renderer/        UI (vanilla HTML/CSS/JS, no framework)
 src/
   scanner.js     Recursive walk; returns paths of .cbr/.rar/.zip/.pdf files
   converter.js   Core pipeline: extract → analyse → pack → validate; calls scanner/renamer/validator
-  validator.js   Opens CBZ with adm-zip, checks image count + magic bytes
+  validator.js   Validates a CBZ via 7-Zip: `7z t` (CRC integrity across every
+                 entry) + `7z l -slt` (count entries with image extensions and
+                 compare to expectedCount). Extension-based, not magic-byte.
   renamer.js     Decides output filename; only renames if current name is generic
 ```
 
@@ -68,7 +70,7 @@ src/
    - Single subdir whose name ≈ archive name → wrapper folder, treated as flat
    - Multiple subdirs → one CBZ per subdir + one for any loose images at root
 3. **Pack** — `adm-zip` creates a flat ZIP (no internal folders) named by `buildOutputName`
-4. **Validate** — image count match + magic-byte check on every entry
+4. **Validate** — `7z t` integrity test (CRC-32 of every entry) + `7z l -slt` listing to count image-extension entries against expectedCount
 5. Original is added to the "delete candidates" list only if ALL outputs validated
 
 ### Naming rules (renamer.js)
