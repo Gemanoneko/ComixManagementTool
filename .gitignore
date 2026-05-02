@@ -7,8 +7,9 @@ dist/
 # Vendored binaries (run "npm run prepare-vendor" locally after cloning)
 vendor/
 
-# Claude Code internal files
-.claude/
+# Claude Code per-machine settings — see Team/Docs/ProcessRules.md "Claude Code Settings"
+.claude/settings.local.json
+.claude/.cache/
 
 # Word documents (design notes, not source)
 *.docx
