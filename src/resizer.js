@@ -315,8 +315,12 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         try {
           await execFilePromise(
             sevenZip,
-            // `tmpCbz` gets `--` protection; `@listPath` is already safe.
-            sevenZipArgs('a', ['-tzip', '-mx=0'], tmpCbz, `@${listPath}`),
+            // `@listPath` is a 7-Zip listfile switch — the helper detects it
+            // and emits an argv shape with no `--` and the listfile as the
+            // trailing positional (per 7-Zip's grammar, `--` stops @listfile
+            // parsing). Switch-injection on `tmpCbz` is still blocked because
+            // the helper prefixes `.\` to any operand starting with `-`.
+            sevenZipArgs('a', ['-tzip', '-mx=0', `@${listPath}`], tmpCbz),
             signal,
             { cwd: tmpDir }
           );

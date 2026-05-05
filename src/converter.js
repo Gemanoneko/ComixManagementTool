@@ -711,10 +711,13 @@ async function packToCbz(imageFiles, outputPath, signal) {
     // cwd=srcDir: 7-Zip adds files by basename → no directory prefix in archive
     await execFilePromise(
       sevenZip,
-      // Pack to `<outputPath>.tmp`; `@listPath` is already safe (leading `@`
-      // disambiguates it from a switch), but `tmpOutputPath` must sit after
-      // the `--` so a filename starting with `-` cannot be parsed as one.
-      sevenZipArgs('a', ['-tzip', '-mx=0'], tmpOutputPath, `@${listPath}`),
+      // `@listPath` is a 7-Zip listfile switch — the helper detects it and
+      // emits an argv shape with no `--` and the listfile as the trailing
+      // positional (per 7-Zip's grammar, `--` stops @listfile parsing).
+      // The helper neutralises any operand starting with `-` by prefixing
+      // `.\` so a switch-injection through `tmpOutputPath` still cannot
+      // happen even without `--`.
+      sevenZipArgs('a', ['-tzip', '-mx=0', `@${listPath}`], tmpOutputPath),
       signal,
       { cwd: srcDir },
     );
