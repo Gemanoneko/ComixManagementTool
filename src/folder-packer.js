@@ -3,18 +3,22 @@
  * folder-packer.js — finds folders whose names have archive extensions
  * (e.g. "Batman - Vol 1.cbz\") and processes them:
  *
- * Category A: folder contains only images/XML → Convert to CBZ
- * Category B: folder contains archives         → Rename (strip the extension)
+ * Category A: folder holds no archives → Convert to CBZ (every file and
+ *             folder in it goes into the CBZ(s), not only the pages)
+ * Category B: folder contains archives → Rename (strip the extension)
  *
  * Conflict handling: if the target name already exists, append (1), (2)… like Windows.
  */
 
-const fs   = require('fs');
-const path = require('path');
+const fs     = require('fs');
+const path   = require('path');
+const os     = require('os');
+const crypto = require('crypto');
 const { execFilePromise } = require('./exec');
 const { sevenZipArgs, listFileContent } = require('./seven-zip');
 const { getSevenZip } = require('./tools');
-const { validateCbz } = require('./validator');
+const { validateCbz, testIntegrity, listEntries, compareEntries } = require('./validator');
+const { formatBytes } = require('./resizer');
 
 const ARCHIVE_FOLDER_EXTS = new Set(['.cbr', '.cbz', '.rar', '.zip']);
 const IMAGE_EXTS           = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif']);
@@ -84,30 +88,78 @@ function folderHasArchives(dir) {
   return false;
 }
 
+// A name Windows can't use as-is.  NTFS can hold one (created through a
+// `\\?\` path, by WSL, or copied from another OS), but ordinary Windows paths
+// drop a trailing space or period and map CON/NUL/… to devices — so the name
+// can't be packed and read back reliably, and a folder with such a name can't
+// even be the working directory for 7-Zip (spawn resolves it to a different,
+// normalised path).  Checked before anything is packed.
+const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\s*\..*)?$/i;
+const INVALID_CHAR  = /[<>:"|?*\x00-\x1f]/;   // `/` and `\` can't occur in a directory entry
+
+function unstorableName(name) {
+  const ch = name.match(INVALID_CHAR);
+  if (ch) {
+    const char = ch[0] < ' ' ? `U+${ch[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}` : ch[0];
+    return { cause: 'name-invalid-char', char };
+  }
+  if (name.endsWith(' '))       return { cause: 'name-trailing-space' };
+  if (name.endsWith('.'))       return { cause: 'name-trailing-dot' };
+  if (RESERVED_NAME.test(name)) return { cause: 'name-reserved' };
+  return null;
+}
+
 /**
- * Recursively collect image + XML files under dir, as paths RELATIVE to dir
- * (so nested pages keep their subfolder inside the CBZ and same-named pages in
- * different subfolders cannot collide).  Images naturally sorted by path.
- * Uses the same dirent rules as countImages, so it finds every image that
- * countImages counts.
+ * Everything under an ext-folder, as paths relative to it:
+ *   files    – { rel, size } for every regular file, in walk order
+ *   dirs     – every folder
+ *   problems – failure records (file, cause, detail) for names Windows can't
+ *              use as-is and for entries that are neither a file nor a
+ *              folder (links, devices), which can't be carried faithfully
+ * Throws if a folder can't be read.
  */
-function deepFiles(dir) {
-  const images = [];
-  const xml    = [];
-  (function walk(d, relDir) {
-    let entries;
-    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
+function walkSource(root) {
+  const files = [], dirs = [], problems = [];
+  (function walk(dir, relDir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const rel = relDir ? path.join(relDir, e.name) : e.name;
-      if (e.isDirectory()) { walk(path.join(d, e.name), rel); continue; }
-      if (!e.isFile()) continue;
-      const ext = path.extname(e.name).toLowerCase();
-      if (IMAGE_EXTS.has(ext))  images.push(rel);
-      else if (ext === '.xml')  xml.push(rel);
+      const bad = unstorableName(e.name);
+      if (bad) {
+        problems.push({ file: rel, ...bad, detail: `Name Windows can't store: ${JSON.stringify(rel)}` });
+        continue;                                      // nothing under a bad folder name can be packed either
+      }
+      if (e.isDirectory()) { dirs.push(rel); walk(path.join(dir, e.name), rel); continue; }
+      if (e.isFile()) { files.push({ rel, size: fs.lstatSync(path.join(dir, e.name)).size }); continue; }
+      problems.push({ file: rel, cause: 'unsupported-entry', detail: `"${rel}" is a link or special file, not a regular file or folder.` });
     }
-  })(dir, '');
-  images.sort(naturalSort);
-  return { images, xml };
+  })(root, '');
+  return { files, dirs, problems };
+}
+
+/** A structured folder-pack failure, carrying one or more records. */
+class PackFailure extends Error {
+  constructor(records) {
+    super(records[0].detail);
+    this.records = records;
+  }
+}
+
+/**
+ * Pull "WARNING: <message>" + "<file>" pairs out of 7-Zip's stderr — how
+ * `7z a` (exit code 1) reports each listed file it could not read (locked by
+ * another program, access denied, vanished).  Those files are simply left out
+ * of the archive.
+ */
+function parseSevenZipReadWarnings(stderr) {
+  const lines = String(stderr || '').split(/\r?\n/);
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^WARNING:\s*(.+)$/);
+    if (!m) continue;
+    const file = lines[i + 1] || '';               // not trimmed: a leading space is part of the name
+    if (file.trim()) { out.push({ file, message: m[1].trim() }); i++; }
+  }
+  return out;
 }
 
 /** Recursively count image files */
@@ -153,7 +205,7 @@ async function collectExtFolders(rootDir, signal) {
  * Scan rootDir for folders with archive extension names.
  * Returns { convertGroups, renameGroups }.
  *
- * convertGroups — Category A: only images/XML inside → pack to CBZ
+ * convertGroups — Category A: no archives inside → pack everything to CBZ
  * renameGroups  — Category B: contains archive files → rename (strip extension)
  */
 async function scanExtFolders(rootDir, log, sendProgress, signal) {
@@ -233,22 +285,36 @@ async function scanExtFolders(rootDir, log, sendProgress, signal) {
 }
 
 /**
- * Convert all selected Category A groups: pack images+XML into CBZ(s), then
- * offer deletion of the source folder.
- * Returns { converted, failed, convertedItems }
- * where convertedItems is [{ folderPath, folderRel, outputPaths }].
+ * Convert all selected Category A groups: pack every file of each folder into
+ * CBZ(s), then offer deletion of the source folder.
+ *
+ * A folder that fails is logged and skipped; the run carries on with the rest.
+ * Every failure is kept as a structured record and all of them are listed
+ * together at the end of the run (logFailureSummary).  A failed folder is
+ * never offered for deletion, is left exactly as it was, and has no CBZ left
+ * behind — so the next Scan Ext-Folders finds it again.
+ *
+ * Returns { converted, failed, convertedItems, failures }
+ *   convertedItems – [{ folderPath, folderRel, outputPaths }]
+ *   failures       – [{ folder, folderPath, records: [{ folder, file, cause, detail, … }] }]
  */
 async function applyConvertFolders(rootDir, groups, log, sendProgress, signal) {
+  const total          = groups.length;
+  let   converted      = 0;
+  const convertedItems = [];
+  const failures       = [];
+  const fail = (group, records) => failures.push({
+    folder: group.folderRel, folderPath: group.folderPath,
+    records: records.map((r) => ({ folder: group.folderRel, file: null, ...r })),
+  });
+
   const sz = getSevenZip();
   if (!sz) {
     log('7-Zip not found — cannot pack folders.', 'error');
-    return { converted: 0, failed: groups.length, convertedItems: [] };
+    for (const g of groups) fail(g, [{ cause: '7zip-not-found', detail: '7-Zip not found — cannot pack folders.' }]);
+    logFailureSummary(failures, log);
+    return { converted: 0, failed: failures.length, convertedItems: [], failures };
   }
-
-  const total          = groups.length;
-  let   converted      = 0;
-  let   failed         = 0;
-  const convertedItems = [];
 
   sendProgress?.(0, total);
 
@@ -266,104 +332,224 @@ async function applyConvertFolders(rootDir, groups, log, sendProgress, signal) {
       convertedItems.push({ folderPath, folderRel, outputPaths });
     } catch (err) {
       if (err.name === 'AbortError' || signal?.aborted) break;
-      log(`  Failed: ${err.message}`, 'error');
-      failed++;
+      log(`Failed: ${folderRel}`, 'error');
+      fail(group, err instanceof PackFailure ? err.records : [{ cause: 'error', detail: err.message }]);
     }
 
     sendProgress?.(i + 1, total);
   }
 
-  return { converted, failed, convertedItems };
+  logFailureSummary(failures, log);
+  return { converted, failed: failures.length, convertedItems, failures };
 }
 
 /**
- * Pack a single ext-named folder into one or more CBZ files.
- * - If folder has no subdirs: one CBZ containing all images + XML
- * - If folder has subdirs: each subdir → one CBZ holding that subdir's WHOLE
- *   tree (images nested deeper keep their relative subfolder inside the CBZ);
- *   loose images at root → one more CBZ
- * Every CBZ is validated (integrity + image count) before it is reported, so
- * the folder is only offered for deletion once all its images are packed.
- * Returns array of created CBZ paths.
+ * Plan the CBZ(s) for one folder from its walkSource listing:
+ * - no subfolders: one CBZ with every file;
+ * - subfolders: each subfolder → one CBZ holding its WHOLE tree (every file,
+ *   nested folders kept, empty ones included), plus one CBZ named after the
+ *   folder for the files at its root.
+ * A subfolder with no files anywhere in it has no CBZ to go in, so it fails
+ * the folder rather than being dropped.
+ * Returns { jobs: [{ name, srcDir, prefix, files: [{rel,size}], dirs }], problems }
+ * with every path in a job relative to its srcDir.
+ */
+function planJobs(folderPath, baseName, src) {
+  const top  = (rel) => !rel.includes(path.sep);
+  const jobs = [], problems = [];
+  const rootFiles = src.files.filter((f) => top(f.rel));
+  const topDirs   = src.dirs.filter(top).sort(naturalSort);
+
+  if (topDirs.length === 0) {
+    jobs.push({ name: baseName, srcDir: folderPath, prefix: '', files: rootFiles, dirs: [] });
+    return { jobs, problems };
+  }
+  for (const d of topDirs) {
+    const pre   = d + path.sep;
+    const files = src.files.filter((f) => f.rel.startsWith(pre)).map((f) => ({ rel: f.rel.slice(pre.length), size: f.size }));
+    if (files.length === 0) {
+      problems.push({ file: d, cause: 'empty-subfolder', detail: `Subfolder "${d}" has no files, so there is no CBZ to keep it in.` });
+      continue;
+    }
+    const dirs = src.dirs.filter((x) => x.startsWith(pre)).map((x) => x.slice(pre.length));
+    jobs.push({ name: d, srcDir: path.join(folderPath, d), prefix: pre, files, dirs });
+  }
+  if (rootFiles.length > 0) jobs.push({ name: baseName, srcDir: folderPath, prefix: '', files: rootFiles, dirs: [] });
+  return { jobs, problems };
+}
+
+/**
+ * Pack a single ext-named folder into one or more CBZ files (see planJobs).
+ *
+ * Every file goes in, not only pages and XML: the folder is offered for
+ * deletion afterwards, so anything left out (.jxl, .txt, empty folders, …)
+ * would be lost.  Before anything is packed, a name Windows can't use as-is
+ * fails the folder.  Each CBZ is then checked against the folder itself —
+ * the same exact-copy check Resize uses: same relative paths, same folders,
+ * same size for every file — plus integrity and, when it has pages, the page
+ * count.  Any difference fails the folder.
+ *
+ * Throws PackFailure (structured records) on failure, after removing every
+ * CBZ this call created; the folder itself is never written to (the 7-Zip
+ * listfile lives in %TEMP%).  Returns the created CBZ paths.
  */
 async function packFolder(sz, folderPath, baseName, parentDir, log, signal) {
-  const { images: looseImages, xml: looseXml, subdirs } = readDirFiles(folderPath);
+  const src = walkSource(folderPath);
+  if (src.problems.length > 0) throw new PackFailure(src.problems);
+  const { jobs, problems } = planJobs(folderPath, baseName, src);
+  if (problems.length > 0) throw new PackFailure(problems);
 
-  // { name, srcDir, entries (paths relative to srcDir), imageCount }
-  const packJobs = [];
-
-  if (subdirs.length === 0) {
-    // Flat folder
-    const files = [...looseImages, ...looseXml];
-    if (files.length > 0) {
-      packJobs.push({ name: baseName, srcDir: folderPath, entries: files.map((f) => path.basename(f)), imageCount: looseImages.length });
-    }
-  } else {
-    // Multi-CBZ: one per subdir + one for loose images at root.
-    // Collect each subdir recursively — a shallow read silently dropped any
-    // image nested more than one level deep, and the folder was still offered
-    // for deletion.
-    for (const sub of subdirs) {
-      const { images: subImages, xml: subXml } = deepFiles(sub.dir);
-      const entries = [...subImages, ...subXml];
-      if (entries.length > 0) {
-        packJobs.push({ name: sub.name, srcDir: sub.dir, entries, imageCount: subImages.length });
-      }
-    }
-    if (looseImages.length > 0) {
-      const files = [...looseImages, ...looseXml];
-      packJobs.push({ name: baseName, srcDir: folderPath, entries: files.map((f) => path.basename(f)), imageCount: looseImages.length });
-    }
-  }
-
-  if (packJobs.length === 0) {
+  if (jobs.length === 0) {
     log(`  ${baseName}: no files to pack`, 'skip');
     return [];
   }
 
   const outputPaths = [];
+  const doneLines   = [];      // logged only once the whole folder has validated
+  try {
+    for (const job of jobs) {
+      if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
 
-  for (const job of packJobs) {
-    if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
-
-    const { targetPath, conflict } = resolveTargetCbz(parentDir, job.name);
-
-    if (conflict) {
-      log(`  Warning: "${job.name}.cbz" already exists — saving as "${path.basename(targetPath)}"`, 'warn', parentDir);
-    }
-
-    const listPath = path.join(job.srcDir, '.cbzpack.lst');
-    fs.writeFileSync(listPath, listFileContent(job.entries), 'utf8');
-    try {
-      await execFilePromise(
-        sz,
-        // `@listPath` is a 7-Zip listfile switch — the helper detects it and
-        // emits an argv shape with no `--` and the listfile as the trailing
-        // positional (per 7-Zip's grammar, `--` stops @listfile parsing).
-        // Switch-injection on `targetPath` is still blocked because the
-        // helper prefixes `.\` to any operand starting with `-`.
-        sevenZipArgs('a', ['-tzip', '-mx=0', `@${listPath}`], targetPath),
-        signal,
-        { cwd: job.srcDir, maxBuffer: 64 * 1024 * 1024 },
-      );
-      // Validate before this output counts — only fully validated folders
-      // reach convertedItems, which is what offers "Delete folder".
-      // (An XML-only subfolder has no pages to lose and nothing to count.)
-      if (job.imageCount > 0) {
-        const v = await validateCbz(targetPath, job.imageCount, signal);
-        if (!v.valid) throw new Error(`Invalid CBZ — ${v.reason}`);
+      const { targetPath, conflict } = resolveTargetCbz(parentDir, job.name);
+      if (conflict) {
+        log(`  Warning: "${job.name}.cbz" already exists — saving as "${path.basename(targetPath)}"`, 'warn', parentDir);
       }
-      log(`  Done: ${path.basename(targetPath)}  (${job.entries.length} file(s))`, 'success', parentDir);
-      outputPaths.push(targetPath);
-    } catch (err) {
-      try { fs.unlinkSync(targetPath); } catch {}
-      throw err;
-    } finally {
-      try { fs.unlinkSync(listPath); } catch {}
+      outputPaths.push(targetPath);   // removed again below if anything fails
+
+      const records = await packJob(sz, job, targetPath, signal);
+      if (records.length > 0) throw new PackFailure(records);
+      doneLines.push(`  Done: ${path.basename(targetPath)}  (${job.files.length} file(s))`);
     }
+  } catch (err) {
+    for (const p of outputPaths) { try { fs.unlinkSync(p); } catch {} }
+    throw err;
+  }
+  for (const line of doneLines) log(line, 'success', parentDir);
+  return outputPaths;
+}
+
+/**
+ * Pack one planned job to `targetPath` and check it.  Returns failure
+ * records (file paths relative to the ext-folder; empty when the CBZ is good).
+ */
+async function packJob(sz, job, targetPath, signal) {
+  const rel   = (p) => job.prefix + p;            // job path → path in the ext-folder
+  const under = (d, p) => p.startsWith(d + path.sep);
+  const emptyDirs  = job.dirs.filter((d) => !job.files.some((f) => under(d, f.rel)) && !job.dirs.some((x) => under(d, x)));
+  const imageCount = job.files.filter((f) => IMAGE_EXTS.has(path.extname(f.rel).toLowerCase())).length;
+
+  // The listfile lives in %TEMP% (cbz_ prefix: the startup sweep removes it
+  // after a crash) — written into the folder being packed it would overwrite
+  // a file of the same name there, and be packed itself next time.
+  const listPath = path.join(os.tmpdir(), `cbz_pack_${crypto.randomBytes(6).toString('hex')}.lst`);
+  fs.writeFileSync(listPath, listFileContent([...job.files.map((f) => f.rel), ...emptyDirs]), 'utf8');
+  try {
+    await execFilePromise(
+      sz,
+      // `@listPath` is a 7-Zip listfile switch — the helper detects it and
+      // emits an argv shape with no `--` and the listfile as the trailing
+      // positional (per 7-Zip's grammar, `--` stops @listfile parsing).
+      // Switch-injection on `targetPath` is still blocked because the
+      // helper prefixes `.\` to any operand starting with `-`.
+      // -sccUTF-8: file names in 7-Zip's warnings arrive intact.
+      sevenZipArgs('a', ['-tzip', '-mx=0', '-sccUTF-8', `@${listPath}`], targetPath),
+      signal,
+      { cwd: job.srcDir, maxBuffer: 64 * 1024 * 1024 },
+    );
+  } catch (err) {
+    if (err.name === 'AbortError' || signal?.aborted) throw err;
+    // Exit code 1 = warnings: 7-Zip left out the files it could not read.
+    const unread = err.code === 1 ? parseSevenZipReadWarnings(err.stderr) : [];
+    if (unread.length > 0) {
+      return unread.map((u) => ({ file: rel(u.file), cause: '7zip-read-error', detail: u.message }));
+    }
+    if (err.code !== 1) {
+      const line = String(err.stderr || '').split(/\r?\n/).map((l) => l.trim()).find(Boolean);
+      return [{ file: null, cause: '7zip-error', detail: line || err.message }];
+    }
+    // Other warnings only — the checks below decide.
+  } finally {
+    try { fs.unlinkSync(listPath); } catch {}
   }
 
-  return outputPaths;
+  // Exact-copy check against the folder: every file with its size, every folder.
+  let outEntries;
+  try {
+    outEntries = await listEntries(targetPath, signal);
+  } catch (err) {
+    if (err.name === 'AbortError' || signal?.aborted) throw err;
+    return [{ file: null, cause: 'invalid-cbz', detail: 'Invalid CBZ — Cannot list archive contents' }];
+  }
+  const expected = [
+    ...job.files.map((f) => ({ path: f.rel, isDir: false, size: f.size, crc: null })),
+    ...job.dirs.map((d) => ({ path: d, isDir: true, size: null, crc: null })),
+  ];
+  const cmp = compareEntries(expected, outEntries, [], 'CBZ');
+  if (!cmp.valid) {
+    const CAUSE = { missing: 'missing-entry', size: 'size-mismatch', content: 'content-mismatch',
+      extra: 'unexpected-entry', 'missing-folder': 'missing-folder', 'extra-folder': 'unexpected-folder' };
+    const LABEL = { missing: 'Missing from CBZ', size: 'Size differs in CBZ', content: 'Content differs in CBZ',
+      extra: 'Unexpected in CBZ', 'missing-folder': 'Folder missing from CBZ', 'extra-folder': 'Unexpected folder in CBZ' };
+    return cmp.problems.map((p) => ({
+      file: rel(p.path), cause: CAUSE[p.cause], detail: `${LABEL[p.cause]}: ${rel(p.path)}`,
+      ...(p.cause === 'size' ? { sourceSize: p.sourceSize, cbzSize: p.outputSize } : {}),
+    }));
+  }
+
+  // Integrity, and the page count when the CBZ holds pages.  (A CBZ made from
+  // a subfolder of non-page files legitimately has none.)
+  const v = imageCount > 0 ? await validateCbz(targetPath, imageCount, signal) : await testIntegrity(targetPath, signal);
+  if (!v.valid) return [{ file: null, cause: 'invalid-cbz', detail: `Invalid CBZ — ${v.reason}` }];
+  return [];
+}
+
+// ── End-of-run failure summary ─────────────────────────────────────────────────
+// Judy's spec (2026-09-28): one block in the log, just before the renderer's
+// "Done: …" line; one entry per failed folder, with its Open Folder button, and
+// a "Fix:" line.  When a folder has several problems, the most actionable one
+// is shown: a bad name, then a file 7-Zip couldn't read, then a missing file,
+// a size difference, a missing folder, then anything else.
+
+const PRIORITY = ['name-trailing-space', 'name-trailing-dot', 'name-reserved', 'name-invalid-char',
+  '7zip-read-error', 'missing-entry', 'size-mismatch', 'missing-folder'];
+
+function describeFailure(records) {
+  const rank = (r) => { const i = PRIORITY.indexOf(r.cause); return i < 0 ? PRIORITY.length : i; };
+  const first = records.reduce((best, r) => (rank(r) < rank(best) ? r : best), records[0]);
+  const sameCause = records.filter((r) => r.cause === first.cause).length;
+  const more = sameCause > 1 ? ` (+${sameCause - 1} more)` : '';
+  const f = first.file;
+  switch (first.cause) {
+    case 'name-trailing-space': return { message: `"${f}" ends with a space — Windows can't store that.`,
+      fix: 'Rename it to remove the trailing space, then pack the folder again.' };
+    case 'name-trailing-dot':   return { message: `"${f}" ends with a period — Windows can't store that.`,
+      fix: 'Rename it to remove the trailing period, then pack the folder again.' };
+    case 'name-reserved':       return { message: `"${f}" is a reserved Windows name (like CON or NUL) — Windows can't store that as a filename.`,
+      fix: 'Rename it to something other than a reserved device name, then pack the folder again.' };
+    case 'name-invalid-char':   return { message: `"${f}" contains a character Windows can't store (${first.char}).`,
+      fix: `Remove ${first.char} from the name, then pack the folder again.` };
+    case 'size-mismatch':       return { message: `"${f}" is ${formatBytes(first.sourceSize)} in the folder but ${formatBytes(first.cbzSize)} in the CBZ.${more}`,
+      fix: 'Pack the folder again.' };
+    case 'missing-entry':       return { message: `"${f}" is in the folder but missing from the CBZ.${more}`,
+      fix: 'Pack the folder again.' };
+    case 'missing-folder':      return { message: `Subfolder "${f}" is in the folder but missing from the CBZ.${more}`,
+      fix: 'Pack the folder again.' };
+    case '7zip-read-error':     return { message: `7-Zip couldn't read "${f}" — ${first.detail.replace(/[.\s]+$/, '')}.`,
+      fix: 'Close any program that has this file open, then pack the folder again.' };
+    default:                    return { message: first.detail,
+      fix: "Pack the folder again — if it keeps failing, check the folder's file and folder names." };
+  }
+}
+
+function logFailureSummary(failures, log) {
+  if (failures.length === 0) return;
+  const n = failures.length;
+  log(`${n} ${n === 1 ? 'folder' : 'folders'} failed to pack:`, 'header');
+  for (const fl of failures) {
+    const { message, fix } = describeFailure(fl.records);
+    log(`  "${fl.folder}" — ${message}`, 'error', fl.folderPath, 'Open this folder in Explorer');
+    log(`    Fix: ${fix}`, 'info');
+  }
 }
 
 /**

@@ -93,15 +93,32 @@ function createWindow() {
 // the (still intact) original; the next launch removes it, silently.
 const resizeJournalPath = path.join(app.getPath('userData'), 'resize-pending.txt');
 
-app.whenReady().then(() => {
-  cleanupOrphanedTempDirs();
-  createWindow();
-  require('./src/resizer').sweepResizeLeftovers(resizeJournalPath).catch(() => {}); // async, silent
+// One copy of the app at a time.  Startup deletes every cbz_* temp item and
+// every journalled .resize.tmp sibling on the assumption that no other copy is
+// using them.  A second copy launched while the first was working deleted the
+// first copy's in-flight files — extraction folders, resized copies waiting
+// for confirmation, or the sibling a cross-drive replace was about to rename
+// over the original — so that work failed.  A second launch now exits before
+// any of that runs, and the existing window is restored and focused instead.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  });
 
-  const { setupUpdater, checkForUpdates } = require('./src/updater');
-  setupUpdater(mainWindow);
-  ipcMain.handle('check-update', () => checkForUpdates());
-});
+  app.whenReady().then(() => {
+    cleanupOrphanedTempDirs();
+    createWindow();
+    require('./src/resizer').sweepResizeLeftovers(resizeJournalPath).catch(() => {}); // async, silent
+
+    const { setupUpdater, checkForUpdates } = require('./src/updater');
+    setupUpdater(mainWindow);
+    ipcMain.handle('check-update', () => checkForUpdates());
+  });
+}
 
 // Windows-only tool: closing the last window always quits — no darwin exception
 // (Studio ProcessRules § The close button must always quit the process).
@@ -771,9 +788,10 @@ ipcMain.handle('folderpack:convert', async (event, { folder, selectedFolderPaths
   folderPackAbortController = new AbortController();
   const signal = folderPackAbortController.signal;
 
-  const sendLog = (msg, type = 'info', pathArg = null) => {
+  // openTitle: tooltip for the line's Open Folder button (end-of-run failure list)
+  const sendLog = (msg, type = 'info', pathArg = null, openTitle = null) => {
     if (!mainWindow.isDestroyed())
-      mainWindow.webContents.send('folderpack:log', { msg, type, path: pathArg });
+      mainWindow.webContents.send('folderpack:log', { msg, type, path: pathArg, openTitle });
   };
   const sendProgress = (current, total) => {
     if (!mainWindow.isDestroyed())

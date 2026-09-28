@@ -438,7 +438,7 @@ electron.on('conversion:complete', (result) => {
 });
 
 // ── Log helpers ───────────────────────────────────────────────────────────────
-function appendLog(msg, type = 'info', folderPath = null) {
+function appendLog(msg, type = 'info', folderPath = null, openTitle = null) {
   const placeholder = logContainer.querySelector('.log-placeholder');
   if (placeholder) placeholder.remove();
 
@@ -455,6 +455,7 @@ function appendLog(msg, type = 'info', folderPath = null) {
     const btn = document.createElement('button');
     btn.className   = 'log-open-btn';
     btn.textContent = 'Open Folder';
+    if (openTitle) btn.title = openTitle;
     btn.addEventListener('click', () => electron.invoke('shell:openPath', folderPath));
     span.appendChild(btn);
     span.appendChild(document.createTextNode('\n'));
@@ -1806,8 +1807,8 @@ electron.on('unwrap:log', ({ msg, type, path: p }) => {
   appendLog(msg, type, p || null);
 });
 
-electron.on('folderpack:log', ({ msg, type, path: p }) => {
-  appendLog(msg, type, p || null);
+electron.on('folderpack:log', ({ msg, type, path: p, openTitle }) => {
+  appendLog(msg, type, p || null, openTitle || null);
 });
 
 electron.on('unwrap:progress', ({ current, total }) => {
@@ -2088,8 +2089,8 @@ electron.on('folderpack:convertComplete', (result) => {
   }
 
   appendLog(
-    `Done: ${result.converted} folder(s) converted` +
-    (result.failed > 0 ? `, ${result.failed} failed (see log above)` : '') + '.',
+    `Done: ${result.converted} ${result.converted === 1 ? 'folder' : 'folders'} converted` +
+    (result.failed > 0 ? `, ${result.failed} failed (see failures above)` : '') + '.',
     result.failed > 0 ? 'warn' : 'success'
   );
 

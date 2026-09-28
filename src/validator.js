@@ -97,12 +97,23 @@ async function listEntries(archivePath, signal) {
  * could not write as-is on Windows (`..\`, `a:b`, `con`, a trailing dot) was
  * renamed during extraction, so it shows up here as missing + extra.
  *
+ * `reason` names the first difference found ("(+N more)" when there are
+ * several of that kind); `problems` lists every difference, one record per
+ * entry, for callers that report them all (folder-pack).  An entry whose size
+ * AND CRC differ is reported once, as a size difference.  `sourceEntries`
+ * may carry `crc: null` (a folder on disk has no stored CRC) — then only the
+ * size is compared.  `noun` names the copy in the messages.
+ *
  * @param {Array<{path:string,isDir:boolean,size:number|null,crc:string|null}>} sourceEntries
  * @param {Array<{path:string,isDir:boolean,size:number|null,crc:string|null}>} outputEntries
  * @param {Iterable<string>} changedPaths  paths (relative, either separator) whose content may differ
- * @returns {{ valid: boolean, reason?: string }}
+ * @param {string} [noun]
+ * @returns {{ valid: boolean, reason?: string,
+ *             problems: Array<{ path: string,
+ *               cause: 'missing'|'size'|'content'|'extra'|'missing-folder'|'extra-folder',
+ *               sourceSize?: number, outputSize?: number }> }}   (sizes on 'size' records)
  */
-function compareEntries(sourceEntries, outputEntries, changedPaths) {
+function compareEntries(sourceEntries, outputEntries, changedPaths, noun = 'resized copy') {
   const key = (p) => p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
   const changed = new Set([...changedPaths].map(key));
 
@@ -126,18 +137,14 @@ function compareEntries(sourceEntries, outputEntries, changedPaths) {
   const src = index(sourceEntries);
   const out = index(outputEntries);
 
-  const describe = (label, list) => {
-    const more = list.length > 1 ? ` (+${list.length - 1} more)` : '';
-    return { valid: false, reason: `${label}: ${list[0]}${more}` };
-  };
-
-  const missing = [], extra = [], differ = [];
+  const missing = [], extra = [], differ = [];   // differ: { path, cause: 'size' | 'content' }
   for (const [k, list] of src.files) {
     const got = out.files.get(k) || [];
     if (got.length < list.length) { missing.push(list[0].path); continue; }
     if (changed.has(k)) continue;
     const s = list[0], o = got[0];
-    if (s.size !== o.size || (s.crc && s.crc !== o.crc)) differ.push(s.path);
+    if (s.size !== o.size)          differ.push({ path: s.path, cause: 'size', sourceSize: s.size, outputSize: o.size });
+    else if (s.crc && s.crc !== o.crc) differ.push({ path: s.path, cause: 'content' });
   }
   for (const [k, list] of out.files) {
     const want = src.files.get(k) || [];
@@ -146,12 +153,27 @@ function compareEntries(sourceEntries, outputEntries, changedPaths) {
   const missingFolders = [...src.folders].filter(([k]) => !out.folders.has(k)).map(([, d]) => d);
   const extraFolders   = [...out.folders].filter(([k]) => !src.folders.has(k)).map(([, d]) => d);
 
-  if (missing.length)        return describe('Missing from resized copy', missing);
-  if (differ.length)         return describe('Changed in resized copy', differ);
-  if (extra.length)          return describe('Unexpected in resized copy', extra);
-  if (missingFolders.length) return describe('Folder missing from resized copy', missingFolders);
-  if (extraFolders.length)   return describe('Unexpected folder in resized copy', extraFolders);
-  return { valid: true };
+  const problems = [
+    ...missing.map((p) => ({ path: p, cause: 'missing' })),
+    ...differ,
+    ...extra.map((p) => ({ path: p, cause: 'extra' })),
+    ...missingFolders.map((p) => ({ path: p, cause: 'missing-folder' })),
+    ...extraFolders.map((p) => ({ path: p, cause: 'extra-folder' })),
+  ];
+  const describe = (label, list) => {
+    const more = list.length > 1 ? ` (+${list.length - 1} more)` : '';
+    return { valid: false, reason: `${label}: ${list[0]}${more}`, problems };
+  };
+
+  if (missing.length)        return describe(`Missing from ${noun}`, missing);
+  if (differ.length) {
+    const label = differ[0].cause === 'size' ? `Size differs in ${noun}` : `Content differs in ${noun}`;
+    return describe(label, differ.map((d) => d.path));
+  }
+  if (extra.length)          return describe(`Unexpected in ${noun}`, extra);
+  if (missingFolders.length) return describe(`Folder missing from ${noun}`, missingFolders);
+  if (extraFolders.length)   return describe(`Unexpected folder in ${noun}`, extraFolders);
+  return { valid: true, problems };
 }
 
 /**
@@ -173,19 +195,9 @@ function compareEntries(sourceEntries, outputEntries, changedPaths) {
  * @returns {Promise<{ valid: boolean, reason?: string }>}
  */
 async function validateCbz(cbzPath, expectedCount, signal) {
-  const sevenZip = getSevenZip();
-  if (!sevenZip) return { valid: false, reason: '7-Zip not found — cannot validate CBZ' };
-
-  const execOpts = { maxBuffer: 64 * 1024 * 1024 };
-
   // 1. Integrity test: 7-Zip computes CRC for every entry and compares to stored value.
-  //    Running async keeps the IPC event loop responsive (Cancel/Pause clicks still work).
-  try {
-    await execFilePromise(sevenZip, sevenZipArgs('t', [], cbzPath), signal, execOpts);
-  } catch (err) {
-    if (err.name === 'AbortError') throw err;
-    return { valid: false, reason: 'Archive integrity test failed (corrupt ZIP or CRC error)' };
-  }
+  const integrity = await testIntegrity(cbzPath, signal);
+  if (!integrity.valid) return integrity;
 
   // 2. List entries and count images (reads only ZIP metadata, not image data).
   let imageCount;
@@ -204,4 +216,26 @@ async function validateCbz(cbzPath, expectedCount, signal) {
   return { valid: true };
 }
 
-module.exports = { validateCbz, countImageEntries, listEntries, compareEntries };
+/**
+ * Step 1 of validateCbz on its own: `7z t` (CRC of every entry), with no
+ * image-count rule — for an archive that legitimately holds no pages (a
+ * folder-pack CBZ made from a subfolder of non-page files).  Async, so the
+ * IPC event loop stays responsive (Cancel/Pause clicks still work).
+ *
+ * @param {string} cbzPath
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<{ valid: boolean, reason?: string }>}
+ */
+async function testIntegrity(cbzPath, signal) {
+  const sevenZip = getSevenZip();
+  if (!sevenZip) return { valid: false, reason: '7-Zip not found — cannot validate CBZ' };
+  try {
+    await execFilePromise(sevenZip, sevenZipArgs('t', [], cbzPath), signal, { maxBuffer: 64 * 1024 * 1024 });
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;
+    return { valid: false, reason: 'Archive integrity test failed (corrupt ZIP or CRC error)' };
+  }
+  return { valid: true };
+}
+
+module.exports = { validateCbz, testIntegrity, countImageEntries, listEntries, compareEntries };

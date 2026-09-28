@@ -773,7 +773,7 @@ async function copyNestedCbz(archive, outDir, log, signal, tree) {
     expected = await countImageEntries(archive, signal);
   } catch (err) {
     if (err.name === 'AbortError' || signal?.aborted) throw err;
-    return fail('Cannot list archive contents');
+    return fail(`Cannot list contents of ${base}`);
   }
 
   if (fs.existsSync(dst)) {
@@ -783,7 +783,7 @@ async function copyNestedCbz(archive, outDir, log, signal, tree) {
       return null;
     }
     if (existing.state === 'mismatch') return fail(`Existing ${name} failed validation — ${existing.reason}`);
-    log(`  WARN: Existing ${name} is unreadable — re-converting…`, 'warn');
+    log(`  WARN: Existing ${name} is unreadable — re-copying…`, 'warn');
     try { fs.unlinkSync(dst); } catch { /* ignore */ }
     if (fs.existsSync(dst)) {                 // could not be removed (locked, or a folder)
       log(`  SKIP (exists): ${name}`, 'skip');
@@ -826,7 +826,8 @@ async function copyNestedCbz(archive, outDir, log, signal, tree) {
  * Rename semantics: `fs.promises.rename` only overwrites an existing target on
  * POSIX; on Windows it fails if the destination exists. That's why the caller
  * always either (a) does not call us at all when `outputPath` already exists
- * and `canOpenCbz` returns true (skip branch), or (b) `unlink`s the stale
+ * and is not unreadable (checkExistingOutput: valid → skip, mismatch →
+ * fail, both leave it untouched), or (b) `unlink`s the stale
  * `outputPath` before packing (unreadable branch). Since both `tmpPath` and
  * `outputPath` live in the same directory the rename is same-volume and
  * cannot fall back to copy+delete. No cross-volume case applies.
@@ -1016,9 +1017,10 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       let reason = null;
       if (tree.failures.length > 0) {
         const more = tree.failures.length > 1 ? ` (+${tree.failures.length - 1} more)` : '';
-        reason = `Nested archive not converted: ${tree.failures[0]}${more}`;
+        reason = `Nested archive not validated: ${tree.failures[0]}${more}`;
       } else if (tree.pagesDone !== treePages) {
-        reason = `${treePages - tree.pagesDone} of ${treePages} page(s) not in a validated CBZ`;
+        const lost = treePages - tree.pagesDone;
+        reason = `${lost} of ${treePages} ${lost === 1 ? 'page' : 'pages'} not in a validated CBZ`;
       }
       if (reason) {
         log(`  ERROR: ${reason}`, 'error');
@@ -1063,17 +1065,32 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       const baseOutputName = buildOutputName(group.name, group.parentName, isManga, group.isSplit);
       const outputPath = claimOutputPath(claims, groupOutDir, baseOutputName);
       const outputName = path.basename(outputPath, '.cbz');
+      const imageCount = group.imageCount ?? group.files.length;
 
+      // An existing output counts as done only if it validates now against
+      // this group's pages (checkExistingOutput) — the same rule as the
+      // hierarchical path.  The old quick open check (canOpenCbz: "opens and
+      // has an image") skipped a short or partial CBZ as "exists"; the archive
+      // was then offered for deletion as soon as another group packed, and
+      // the pages missing from that CBZ existed only in the original.
+      //   valid      → skip; it counts as done
+      //   unreadable → replace it
+      //   mismatch   → leave it untouched and fail the archive
       if (fs.existsSync(outputPath)) {
-        if (await canOpenCbz(outputPath)) {
+        const existing = await checkExistingOutput(outputPath, imageCount, signal);
+        if (existing.state === 'valid') {
           log(`  SKIP (exists): ${outputName}.cbz`, 'skip');
           continue;
+        }
+        if (existing.state === 'mismatch') {
+          const reason = `Existing ${outputName}.cbz failed validation — ${existing.reason}`;
+          log(`  ERROR: ${reason}`, 'error');
+          return { success: false, outcome: 'validationFailed', reason, isPdf, pdfPages };
         }
         log(`  WARN: Existing ${outputName}.cbz is unreadable — re-converting…`, 'warn');
         try { fs.unlinkSync(outputPath); } catch { /* ignore */ }
       }
 
-      const imageCount = group.imageCount ?? group.files.length;
       log(`  Packing → ${outputName}.cbz  (${imageCount} images)`, 'info');
 
       // pack → validate → rename.  An abort or crash between pack and rename
@@ -1093,8 +1110,10 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       : outputs.length === 1 ? 'single' : 'multi';
     const folderName = groups.length > 1 ? baseName : null;
     // validated:true only when an output was produced this run (i.e. it went
-    // through packAndValidate).  `allSkipped` returns success:false so the
-    // renderer's delete-original gate never fires on a mere skip.
+    // through packAndValidate); every group skipped as "exists" validated this
+    // run too (checkExistingOutput), or the archive failed above.
+    // `allSkipped` returns success:false so the renderer's delete-original
+    // gate never fires on a mere skip.
     return {
       success: outputs.length > 0,
       validated: outputs.length > 0,
@@ -1316,9 +1335,16 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
   // Post-scan: find pre-existing orphaned originals (from previous runs)
   const { simple: preExisting, needsReview } = await findOrphanedOriginals(rootFolder);
 
-  // Remove files already in 'converted' from preExisting (avoid duplicates)
+  // Remove files already in 'converted' from preExisting (avoid duplicates).
+  // Also drop every archive that failed validation in THIS run: the orphan
+  // scan only checks that a same-name .cbz opens, and that .cbz may be the
+  // very output that just failed (e.g. a short Solo.cbz beside Solo.cbr),
+  // so offering the original for deletion would lose the pages missing from it.
   const convertedSet  = new Set(converted);
-  const uniquePreExisting = preExisting.filter((f) => !convertedSet.has(f));
+  const failedSet     = new Set(outcomes
+    .filter((o) => o.result?.outcome === 'validationFailed')
+    .map((o) => o.file));
+  const uniquePreExisting = preExisting.filter((f) => !convertedSet.has(f) && !failedSet.has(f));
 
   if (uniquePreExisting.length > 0) {
     log(`\nFound ${uniquePreExisting.length} pre-existing original(s) with a matching .cbz already present.`, 'warn');

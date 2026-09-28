@@ -539,4 +539,4 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
   return { resized, skipped, errors, totalSavedBytes };
 }
 
-module.exports = { startResize, replaceWithResized, sweepResizeLeftovers };
+module.exports = { startResize, replaceWithResized, sweepResizeLeftovers, formatBytes };
