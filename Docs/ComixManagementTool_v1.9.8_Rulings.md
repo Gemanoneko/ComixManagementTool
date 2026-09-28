@@ -177,3 +177,29 @@ Controls are at least 24×24 CSS px (32–40 is comfortable) and must not overla
     - `"<f>" is <a> in the original but <b> in the resized copy.<more>`
     - When `formatBytes` would print the two sizes the same, use exact bytes: `… is <a> bytes in the original but <b> bytes in the resized copy.<more>`
     - Judy checks this wording in her review of the build.
+20. **Fix Ender's N1–N3 in v1.10.0:**
+    - **N1:** Convert fails on archives whose internal paths push 7-Zip's working folder past about 258 characters.
+    - **N2:** a *folder* named `Thumbs.db` or `desktop.ini` makes the pack fail.
+    - **N3:** a folder with a device name (e.g. `con`) may target a bad CBZ name.
+
+## Judy's red-team review of `5242abf`: changes to make
+
+These are text and UX fixes only. Every item not listed here stays as it is.
+
+1. **Rename errors.** Make these three changes:
+   - `Folder is not in the last scan.` → `Folder is not in the last scan. Scan Ext-Folders again, then retry.`
+   - `File or folder not found.` → `File or folder not found. It may have moved — scan Ext-Folders again.`
+   - `"<name>" already exists.` → `"<name>" already exists. Click Fix again to use the next available name.`
+
+   Keep these as they are: `Path is outside the folder.`, `Name has nothing to fix.`, `A pack is running — try again when it finishes.`
+2. **Raw file-system rename error** (`folder-packer.js` ~719): `"<name>" couldn't be renamed (<err.code or 'unknown error'>). Close anything using it, then try Fix again.` Show no full paths.
+3. **`.pack-fix-name`:** `white-space: pre-wrap; overflow-wrap: anywhere;` instead of `pre`. Long paths then wrap in the rows and in the Fix All modal, and trailing spaces stay visible.
+4. **Fatal 7-Zip message** (`firstErrorLine()` in `converter.js` and the duplicated logic in `resizer.js`): when the output has a bare `ERROR: <path>` line, show the line **after** it. Fall back to the first non-empty line only when there's no such line. One shared helper for both files.
+5. **`.log-open-btn`:** add `min-height: 24px`. It's about 18.8px tall today in every theme, and it's the Open Folder button on every error-block line.
+6. **Show the full relative new name,** not just the leaf name:
+   - Row: `to.textContent = "<newRelPath>" + (dir ? "\\" : "")`, in quotes.
+   - Fix All modal: `"<folderRel>\<relPath>" → "<folderRel>\<newRelPath>"`.
+
+   This way a rename inside a subfolder doesn't look like a move.
+
+**Confirmed as built:** `con.txt` → `con_.txt`; quoted names; `folder\entry` paths in the log; the 24px minimum height inside the panels; panel titles; the Convert catch-all.
