@@ -61,7 +61,29 @@
       "Bash(git rebase:*)",
       "Bash(npm publish:*)",
       "Bash(rm -rf:*)",
-      "Bash(rm -r:*)"
+      "Bash(rm -r:*)",
+      "Bash(git push *--force*)",
+      "Bash(git push -f*)",
+      "Bash(git -C * push *--force*)",
+      "Bash(git -C * push -f*)",
+      "Bash(rm -fr:*)",
+      "PowerShell(git push --force:*)",
+      "PowerShell(git reset --hard:*)",
+      "PowerShell(git clean -f:*)",
+      "PowerShell(git clean -fd:*)",
+      "PowerShell(git clean -fdx:*)",
+      "PowerShell(git rebase:*)",
+      "PowerShell(npm publish:*)",
+      "PowerShell(Remove-Item -Recurse *)",
+      "PowerShell(Remove-Item * -Recurse *)",
+      "PowerShell(Remove-Item * -Recurse)",
+      "PowerShell(rm -rf:*)",
+      "PowerShell(rm -r:*)",
+      "PowerShell(git push *--force*)",
+      "PowerShell(git push -f*)",
+      "PowerShell(git -C * push *--force*)",
+      "PowerShell(git -C * push -f*)",
+      "PowerShell(rm -fr:*)"
     ]
   }
 }
