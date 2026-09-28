@@ -34,4 +34,5 @@ Thumbs.db
 *.suo
 *.user
 
-scratch/ # local scratch dir — see Team/Docs/ProcessRules.md § Repository Hygiene
+# Throwaway test harnesses — see Team/Docs/ProcessRules.md § Repository Hygiene
+scratch/

@@ -6,10 +6,9 @@ version tags rather than semantic versioning strictness.
 
 ## [v1.9.7] - 2026-09-28
 
-### Fixed
-- Closing the last window now always quits the app — the leftover macOS-only branch is gone.
-
 ### Changed
+- Closing the last window now goes through one unconditional quit — the macOS-only branch is
+  gone; no behavior change on Windows.
 - Release cleanup now runs as its own final CI step, so a cleanup error can no longer fail a
   release that already published.
 - Publishing is CI-only: `npm run release` and `npm run build` refuse to run outside GitHub
