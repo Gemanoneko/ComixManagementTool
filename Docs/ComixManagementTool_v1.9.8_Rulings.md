@@ -203,3 +203,9 @@ These are text and UX fixes only. Every item not listed here stays as it is.
    This way a rename inside a subfolder doesn't look like a move.
 
 **Confirmed as built:** `con.txt` → `con_.txt`; quoted names; `folder\entry` paths in the log; the 24px minimum height inside the panels; panel titles; the Convert catch-all.
+
+## More rulings (Sergei, after `a53a19b`)
+21. **Fix all three of Ender's findings from the `a53a19b` report in v1.10.0:**
+    - **Unwrap:** a bundle named after a device (`con.cbz`) must not create a device-named folder. Apply the `_` rule in `unwrapper.js`.
+    - **Re-runs after a `_` rename:** once `nul.zip` has become `nul_.cbz`, a re-run must still match the two, so the original is offered as pre-existing, not sent to needs-review.
+    - **Resize on very deep archives:** test the ImageMagick path limit, and fix it if it fails.
