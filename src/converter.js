@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFilePromise } = require('./exec');
-const { sevenZipArgs } = require('./seven-zip');
+const { sevenZipArgs, listFileContent } = require('./seven-zip');
 const { scanForFiles } = require('./scanner');
 const { validateCbz } = require('./validator');
 const { buildOutputName } = require('./renamer');
@@ -94,6 +94,16 @@ async function canOpenCbz(cbzPath) {
 
 // ─── Extraction ─────────────────────────────────────────────────────────────
 
+/**
+ * True when the already-resolved `candidate` lies strictly inside `root`.
+ * path.relative is case-insensitive on win32 (matches NTFS) and returns an
+ * absolute path when the two sit on different drives.
+ */
+function isInsideDir(root, candidate) {
+  const rel = path.relative(root, candidate);
+  return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
+}
+
 // Returns an array of filenames that were skipped due to CRC corruption
 // (empty array on a clean extraction).  Throws on fatal errors.
 async function extractArchive(srcFile, destDir, signal) {
@@ -124,9 +134,23 @@ async function extractArchive(srcFile, destDir, signal) {
     );
     if (nonCrcError || crcNames.length === 0) throw err;
 
+    // Each <name> is the RAW entry name from the untrusted archive.  7-Zip
+    // strips `..` / drive prefixes when it writes an entry, so the corrupt
+    // extract itself landed inside destDir — but the stderr line echoes the
+    // unsanitised name, and joining `..\..\x` or `C:\x` onto destDir points
+    // OUTSIDE it (the unlink below then deleted an unrelated file).  Resolve
+    // every name and confine it to destDir first.  If any escapes, we cannot
+    // tell where 7-Zip put that corrupt page, so fail the archive closed:
+    // nothing is unlinked, no CBZ is produced, the original is never offered
+    // for deletion.
+    const root     = path.resolve(destDir);
+    const crcPaths = crcNames.map((name) => path.resolve(root, name));
+    if (crcPaths.some((full) => !isInsideDir(root, full))) {
+      throw new Error('Unsafe file path inside archive — not converted');
+    }
+
     // Delete the bad extracts so they don't end up in the output CBZ.
-    for (const name of crcNames) {
-      const full = path.join(destDir, name);
+    for (const full of crcPaths) {
       try { await fs.promises.unlink(full); } catch {}
     }
     return crcNames;
@@ -702,7 +726,7 @@ async function packToCbz(imageFiles, outputPath, signal) {
   // so it is auto-removed by removeTempDir and by the startup orphan cleanup.
   const listPath = path.join(srcDir, '.cbzpack.lst');
   const tmpOutputPath = outputPath + '.tmp';
-  fs.writeFileSync(listPath, basenames.join('\n'), 'utf8');
+  fs.writeFileSync(listPath, listFileContent(basenames), 'utf8');
   // If a stale .tmp already exists from a prior crash/abort, remove it so
   // 7-Zip doesn't try to append to it (it creates-or-updates by default).
   try { fs.unlinkSync(tmpOutputPath); } catch { /* ignore — may not exist */ }
@@ -888,11 +912,28 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
 
     // 4. Create a CBZ for each group
     const outputs = [];
+    // Output names already assigned to a group of THIS archive (lower-cased —
+    // Windows file names are case-insensitive).
+    const usedNames = new Set();
 
     for (const group of groups) {
       if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
 
-      const outputName = buildOutputName(group.name, group.parentName, isManga, group.isSplit);
+      // Several generic subdir names collapse to one output name
+      // (buildOutputName maps "Chapter 1", "Part 1", "Issue 1", "001" … all to
+      // "… #001").  The second group then hit the skip-if-exists branch below
+      // as "already converted" — its pages were never packed, yet the archive
+      // still validated and the original became deletable.  Give each group of
+      // this archive its own name by appending " (n)", Windows-style.  Only
+      // names assigned in this run are consulted (never the disk), so a re-run
+      // maps every group to the same name again and the skip branch stays a
+      // genuine cross-run "already converted".
+      const baseOutputName = buildOutputName(group.name, group.parentName, isManga, group.isSplit);
+      let outputName = baseOutputName;
+      for (let n = 1; usedNames.has(outputName.toLowerCase()); n++) {
+        outputName = `${baseOutputName} (${n})`;
+      }
+      usedNames.add(outputName.toLowerCase());
       const outputPath = path.join(groupOutDir, outputName + '.cbz');
 
       if (fs.existsSync(outputPath)) {
@@ -962,15 +1003,33 @@ async function findOrphanedOriginals(rootDir) {
   const normaliseForMatch = (s) =>
     s.toLowerCase().replace(/\)\s*\(/g, ') (').replace(/\s+/g, ' ').trim();
 
+  // This walk covers the WHOLE library after every conversion.  With
+  // readdirSync and no macrotask yield it ran as one synchronous block on the
+  // Electron main process (awaiting an already-settled promise only drains
+  // microtasks), freezing the UI for the whole post-scan.  Read directories
+  // asynchronously and yield every ORPHAN_YIELD_WORK units of work, as
+  // scanner.js does, so IPC and window messages keep flowing.
+  const ORPHAN_YIELD_WORK = 250;
+  let workSinceYield = 0;
+  const maybeYield = async (units) => {
+    workSinceYield += units;
+    if (workSinceYield >= ORPHAN_YIELD_WORK) {
+      workSinceYield = 0;
+      await new Promise((r) => setImmediate(r));
+    }
+  };
+
   async function walk(dir) {
+    await new Promise((r) => setImmediate(r)); // yield between directories
     let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
 
     // Collect files in this directory by extension.
     // cbzByNorm maps a normalised stem → actual CBZ filename, so we can find the
     // real file even when casing or spacing differs (e.g. "(Rip)(DCP)" vs "(Rip) (DCP)").
     const byExt = { src: [], cbzNames: [], cbzByNorm: new Map() };
     for (const e of entries) {
+      await maybeYield(1);
       if (!e.isFile()) continue;
       const ext = path.extname(e.name).toLowerCase();
       if (ext === '.cbz') {
@@ -982,6 +1041,8 @@ async function findOrphanedOriginals(rootDir) {
     }
 
     for (const name of byExt.src) {
+      // likelyCbzMatches below costs one normalisation per CBZ in the folder.
+      await maybeYield(1 + byExt.cbzNames.length);
       const base    = normaliseForMatch(path.basename(name, path.extname(name)));
       const full    = path.join(dir, name);
       const cbzName = byExt.cbzByNorm.get(base); // actual CBZ filename (may differ in spacing)

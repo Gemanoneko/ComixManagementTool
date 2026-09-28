@@ -12,8 +12,9 @@
 const fs   = require('fs');
 const path = require('path');
 const { execFilePromise } = require('./exec');
-const { sevenZipArgs }    = require('./seven-zip');
+const { sevenZipArgs, listFileContent } = require('./seven-zip');
 const { getSevenZip } = require('./tools');
+const { validateCbz } = require('./validator');
 
 const ARCHIVE_FOLDER_EXTS = new Set(['.cbr', '.cbz', '.rar', '.zip']);
 const IMAGE_EXTS           = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif']);
@@ -81,6 +82,32 @@ function folderHasArchives(dir) {
     if (e.isDirectory() && folderHasArchives(path.join(dir, e.name))) return true;
   }
   return false;
+}
+
+/**
+ * Recursively collect image + XML files under dir, as paths RELATIVE to dir
+ * (so nested pages keep their subfolder inside the CBZ and same-named pages in
+ * different subfolders cannot collide).  Images naturally sorted by path.
+ * Uses the same dirent rules as countImages, so it finds every image that
+ * countImages counts.
+ */
+function deepFiles(dir) {
+  const images = [];
+  const xml    = [];
+  (function walk(d, relDir) {
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const rel = relDir ? path.join(relDir, e.name) : e.name;
+      if (e.isDirectory()) { walk(path.join(d, e.name), rel); continue; }
+      if (!e.isFile()) continue;
+      const ext = path.extname(e.name).toLowerCase();
+      if (IMAGE_EXTS.has(ext))  images.push(rel);
+      else if (ext === '.xml')  xml.push(rel);
+    }
+  })(dir, '');
+  images.sort(naturalSort);
+  return { images, xml };
 }
 
 /** Recursively count image files */
@@ -252,32 +279,40 @@ async function applyConvertFolders(rootDir, groups, log, sendProgress, signal) {
 /**
  * Pack a single ext-named folder into one or more CBZ files.
  * - If folder has no subdirs: one CBZ containing all images + XML
- * - If folder has subdirs: each subdir → one CBZ; loose images at root → one more CBZ
+ * - If folder has subdirs: each subdir → one CBZ holding that subdir's WHOLE
+ *   tree (images nested deeper keep their relative subfolder inside the CBZ);
+ *   loose images at root → one more CBZ
+ * Every CBZ is validated (integrity + image count) before it is reported, so
+ * the folder is only offered for deletion once all its images are packed.
  * Returns array of created CBZ paths.
  */
 async function packFolder(sz, folderPath, baseName, parentDir, log, signal) {
   const { images: looseImages, xml: looseXml, subdirs } = readDirFiles(folderPath);
 
-  const packJobs = []; // { name, srcDir, basenames }
+  // { name, srcDir, entries (paths relative to srcDir), imageCount }
+  const packJobs = [];
 
   if (subdirs.length === 0) {
     // Flat folder
     const files = [...looseImages, ...looseXml];
     if (files.length > 0) {
-      packJobs.push({ name: baseName, srcDir: folderPath, basenames: files.map((f) => path.basename(f)) });
+      packJobs.push({ name: baseName, srcDir: folderPath, entries: files.map((f) => path.basename(f)), imageCount: looseImages.length });
     }
   } else {
-    // Multi-CBZ: one per subdir + one for loose images at root
+    // Multi-CBZ: one per subdir + one for loose images at root.
+    // Collect each subdir recursively — a shallow read silently dropped any
+    // image nested more than one level deep, and the folder was still offered
+    // for deletion.
     for (const sub of subdirs) {
-      const { images: subImages, xml: subXml } = readDirFiles(sub.dir);
-      const files = [...subImages, ...subXml];
-      if (files.length > 0) {
-        packJobs.push({ name: sub.name, srcDir: sub.dir, basenames: files.map((f) => path.basename(f)) });
+      const { images: subImages, xml: subXml } = deepFiles(sub.dir);
+      const entries = [...subImages, ...subXml];
+      if (entries.length > 0) {
+        packJobs.push({ name: sub.name, srcDir: sub.dir, entries, imageCount: subImages.length });
       }
     }
     if (looseImages.length > 0) {
       const files = [...looseImages, ...looseXml];
-      packJobs.push({ name: baseName, srcDir: folderPath, basenames: files.map((f) => path.basename(f)) });
+      packJobs.push({ name: baseName, srcDir: folderPath, entries: files.map((f) => path.basename(f)), imageCount: looseImages.length });
     }
   }
 
@@ -298,7 +333,7 @@ async function packFolder(sz, folderPath, baseName, parentDir, log, signal) {
     }
 
     const listPath = path.join(job.srcDir, '.cbzpack.lst');
-    fs.writeFileSync(listPath, job.basenames.join('\n'), 'utf8');
+    fs.writeFileSync(listPath, listFileContent(job.entries), 'utf8');
     try {
       await execFilePromise(
         sz,
@@ -311,7 +346,14 @@ async function packFolder(sz, folderPath, baseName, parentDir, log, signal) {
         signal,
         { cwd: job.srcDir, maxBuffer: 64 * 1024 * 1024 },
       );
-      log(`  Done: ${path.basename(targetPath)}  (${job.basenames.length} file(s))`, 'success', parentDir);
+      // Validate before this output counts — only fully validated folders
+      // reach convertedItems, which is what offers "Delete folder".
+      // (An XML-only subfolder has no pages to lose and nothing to count.)
+      if (job.imageCount > 0) {
+        const v = await validateCbz(targetPath, job.imageCount, signal);
+        if (!v.valid) throw new Error(`Validation failed — ${v.reason}`);
+      }
+      log(`  Done: ${path.basename(targetPath)}  (${job.entries.length} file(s))`, 'success', parentDir);
       outputPaths.push(targetPath);
     } catch (err) {
       try { fs.unlinkSync(targetPath); } catch {}

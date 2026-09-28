@@ -15,6 +15,11 @@ const os = require('os');
  * Swept:
  *   cbz_*              — our own extraction temp directories (and any file
  *                        prefixed cbz_, e.g. cbz_resized_*.cbz from resizer)
+ *
+ * Safe to sweep cbz_resized_*: resize:confirm (replaceWithResized) never
+ * writes into the original in place, so a resized temp copy is never the only
+ * surviving copy of a comic — the original stays intact until a complete,
+ * flushed replacement is renamed over it.
  */
 function cleanupOrphanedTempDirs() {
   const tmpBase = os.tmpdir();
@@ -407,22 +412,19 @@ ipcMain.handle('resize:cancel', () => {
   resizeAbortController?.abort();
 });
 
-// Replace each original CBZ with its resized temp copy
+// Replace each original CBZ with its resized temp copy.  replaceWithResized
+// never writes into the original in place (atomic rename, or — across drives —
+// copy to a sibling on the destination volume, flush, then rename), so a crash
+// mid-replace cannot truncate the only copy.
 ipcMain.handle('resize:confirm', async (event, items) => {
+  const { replaceWithResized } = require('./src/resizer');
   const results = [];
   for (const { original, tmp } of items) {
     try {
-      await fs.promises.rename(tmp, original);
+      await replaceWithResized(tmp, original);
       results.push({ file: original, success: true });
     } catch (err) {
-      // rename can fail across drives — fall back to copy + delete
-      try {
-        await fs.promises.copyFile(tmp, original);
-        await fs.promises.unlink(tmp);
-        results.push({ file: original, success: true });
-      } catch (err2) {
-        results.push({ file: original, success: false, error: err2.message });
-      }
+      results.push({ file: original, success: false, error: err.message });
     }
   }
   return results;

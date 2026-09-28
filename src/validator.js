@@ -6,6 +6,32 @@ const { getSevenZip } = require('./tools');
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif']);
 
 /**
+ * Count the image-extension entries in an archive via `7z l -slt` (metadata
+ * only).  Same extension-based rule validateCbz applies, so a count taken from
+ * a SOURCE archive can be handed to validateCbz as the expected count for its
+ * repack.  Throws if the archive cannot be listed.
+ *
+ * @param {string} archivePath
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<number>}
+ */
+async function countImageEntries(archivePath, signal) {
+  const sevenZip = getSevenZip();
+  if (!sevenZip) throw new Error('7-Zip not found — cannot list archive');
+  const { stdout } = await execFilePromise(
+    sevenZip, sevenZipArgs('l', ['-slt'], archivePath), signal, { maxBuffer: 64 * 1024 * 1024 },
+  );
+  return stdout
+    .split(/\r?\n/)
+    .filter((line) => {
+      if (!line.startsWith('Path = ')) return false;
+      const ext = path.extname(line.slice(7).trim()).toLowerCase();
+      return IMAGE_EXTS.has(ext);
+    })
+    .length;
+}
+
+/**
  * Validates a CBZ file using 7-Zip — no image data is loaded into Node.js RAM,
  * and the calls are async so the Electron main-process event loop is never blocked.
  *
@@ -39,22 +65,13 @@ async function validateCbz(cbzPath, expectedCount, signal) {
   }
 
   // 2. List entries and count images (reads only ZIP metadata, not image data).
-  let stdout;
+  let imageCount;
   try {
-    ({ stdout } = await execFilePromise(sevenZip, sevenZipArgs('l', ['-slt'], cbzPath), signal, execOpts));
+    imageCount = await countImageEntries(cbzPath, signal);
   } catch (err) {
     if (err.name === 'AbortError') throw err;
     return { valid: false, reason: 'Cannot list archive contents' };
   }
-
-  const imageCount = stdout
-    .split(/\r?\n/)
-    .filter((line) => {
-      if (!line.startsWith('Path = ')) return false;
-      const ext = path.extname(line.slice(7).trim()).toLowerCase();
-      return IMAGE_EXTS.has(ext);
-    })
-    .length;
 
   if (imageCount === 0) return { valid: false, reason: 'CBZ contains no image files' };
   if (imageCount !== expectedCount) {
@@ -64,4 +81,4 @@ async function validateCbz(cbzPath, expectedCount, signal) {
   return { valid: true };
 }
 
-module.exports = { validateCbz };
+module.exports = { validateCbz, countImageEntries };

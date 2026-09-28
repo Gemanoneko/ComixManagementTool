@@ -98,4 +98,26 @@ function sevenZipArgs(op, switches, ...operands) {
   return [op, ...realSwitches, ...safeOperands, ...listFiles];
 }
 
-module.exports = { sevenZipArgs };
+/**
+ * Serialise file names for a 7-Zip `@listfile`.
+ *
+ * 7-Zip trims every listfile line, so a page named " 004.jpg" (leading space)
+ * or "004.jpg " (trailing space) was looked up without its edge whitespace and
+ * the pack failed with "The system cannot find the file specified".  After
+ * trimming, 7-Zip strips one pair of surrounding double quotes, so quoting
+ * every line preserves the name exactly.  `"` is illegal in Windows file
+ * names, so it can never occur inside a name and the quoting is unambiguous.
+ *
+ * @param {string[]} names  paths relative to the 7-Zip cwd
+ * @returns {string}        listfile content (write as UTF-8)
+ */
+function listFileContent(names) {
+  for (const n of names) {
+    if (typeof n !== 'string' || /["\r\n]/.test(n)) {
+      throw new TypeError(`listFileContent: name cannot be written to a 7-Zip listfile: ${JSON.stringify(n)}`);
+    }
+  }
+  return names.map((n) => `"${n}"`).join('\n');
+}
+
+module.exports = { sevenZipArgs, listFileContent };

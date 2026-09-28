@@ -6,15 +6,18 @@ const os     = require('os');
 const crypto = require('crypto');
 
 const { execFilePromise } = require('./exec');
-const { sevenZipArgs }    = require('./seven-zip');
+const { sevenZipArgs, listFileContent } = require('./seven-zip');
 const { getSevenZip, getImageMagick } = require('./tools');
-const { validateCbz }                 = require('./validator');
+const { validateCbz, countImageEntries } = require('./validator');
 
 const IMAGE_EXTS    = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif']);
 // 7-Zip include-filter args — extract only image files so that non-image
 // entries (PDFs, config dirs, etc.) inside CBZs are never touched and
 // never cause "Cannot create folder" conflicts.
-const IMAGE_INCLUDE_ARGS = [...IMAGE_EXTS].map((ext) => `-i!*${ext}`);
+// `-ir!` (recursive include), NOT `-i!`: the plain form matches root-level
+// entries only, so pages stored in subfolders (Ch1/001.jpg …) were silently
+// left out of the extraction — and therefore out of the resized replacement.
+const IMAGE_INCLUDE_ARGS = [...IMAGE_EXTS].map((ext) => `-ir!*${ext}`);
 const MAX_LONG_SIDE = 4500;
 const QUALITY       = 90;
 const BATCH_SIZE    = 50;
@@ -40,6 +43,72 @@ function formatBytes(bytes) {
   if (bytes < 1024 * 1024)     return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 ** 3)       return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+/**
+ * Recursively list files under `root`, returning paths RELATIVE to root.
+ * Returns { images, xml } — images naturally sorted by relative path so pages
+ * keep their reading order (root pages first, then each subfolder in order).
+ */
+function collectTree(root) {
+  const images = [];
+  const xml    = [];
+  (function walk(dir, relDir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const rel = relDir ? path.join(relDir, e.name) : e.name;
+      if (e.isDirectory()) { walk(path.join(dir, e.name), rel); continue; }
+      if (!e.isFile()) continue;
+      const ext = path.extname(e.name).toLowerCase();
+      if (IMAGE_EXTS.has(ext)) images.push(rel);
+      else if (ext === '.xml') xml.push(rel);
+    }
+  })(root, '');
+  images.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return { images, xml };
+}
+
+/** fsync a file so its data is on disk before it replaces anything. */
+async function fsyncFile(p) {
+  const fh = await fs.promises.open(p, 'r+');
+  try { await fh.sync(); } finally { await fh.close(); }
+}
+
+/**
+ * Replace `original` with the resized copy at `tmp` without ever leaving the
+ * original half-written.
+ *
+ *   • Same volume: `rename` is an atomic replace (MoveFileEx
+ *     REPLACE_EXISTING) — the original is either the old file or the new one.
+ *   • Different volume (tmp lives in %TEMP%, library on another drive →
+ *     EXDEV) or any other rename failure: the old code ran
+ *     `copyFile(tmp, original)`, which truncates the original before writing,
+ *     so a crash mid-copy destroyed it — and the next launch's `cbz_*` temp
+ *     sweep then deleted the only complete copy.  Now the copy goes to a
+ *     sibling temp file on the destination volume, is flushed, and only then
+ *     renamed over the original (atomic, same volume).  A crash at any point
+ *     leaves the original intact (plus, at worst, an ignorable `.tmp`
+ *     sibling), so the %TEMP% copy is never the only surviving copy and the
+ *     startup sweep cannot lose data.
+ *
+ * Throws on failure; the original is untouched in that case.
+ */
+async function replaceWithResized(tmp, original) {
+  await fsyncFile(tmp);
+  try {
+    await fs.promises.rename(tmp, original);
+    return;
+  } catch { /* EXDEV or similar — fall through to the destination-side copy */ }
+
+  const sibling = `${original}.${crypto.randomBytes(4).toString('hex')}.resize.tmp`;
+  try {
+    await fs.promises.copyFile(tmp, sibling, fs.constants.COPYFILE_EXCL);
+    await fsyncFile(sibling);
+    await fs.promises.rename(sibling, original);
+  } catch (err) {
+    try { await fs.promises.unlink(sibling); } catch {}
+    throw err;
+  }
+  try { await fs.promises.unlink(tmp); } catch {}
 }
 
 async function scanCbz(folder) {
@@ -224,7 +293,9 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
 
         const originalSize = fs.statSync(cbzPath).size;
 
-        // 1. Extract flat (no subdirs) into tmpDir, images only.
+        // 1. Extract WITH paths into tmpDir, images (+ XML) only, recursively.
+        //    • `x` keeps the folder tree, so Ch1/001.jpg and Ch2/001.jpg stay
+        //      two pages instead of colliding into one flat 001.jpg.
         //    • longPath() adds \\?\ so 7-Zip can open CBZs whose full path
         //      exceeds the Windows 260-character MAX_PATH limit.
         //    • IMAGE_INCLUDE_ARGS restrict extraction to image extensions so
@@ -232,13 +303,15 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         //      processed and never cause "Cannot create folder" conflicts.
         //    • 7-Zip exit code 1 = warnings only (e.g. "Unexpected end of
         //      archive" on a truncated file).  We log it and continue with
-        //      whatever pages were extracted rather than aborting the file.
+        //      whatever pages were extracted — step 6 validates the repack
+        //      against the ORIGINAL's page count, so a short extraction can
+        //      never become a replacement.
         try {
           await execFilePromise(
             sevenZip,
             sevenZipArgs(
-              'e',
-              [`-o${longPath(tmpDir)}`, '-y', ...IMAGE_INCLUDE_ARGS, '-i!*.xml', '-i!*.XML'],
+              'x',
+              [`-o${longPath(tmpDir)}`, '-y', ...IMAGE_INCLUDE_ARGS, '-ir!*.xml', '-ir!*.XML'],
               longPath(cbzPath),
             ),
             signal
@@ -249,16 +322,12 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
           log(`Archive warning: ${(err.stderr?.trim() || err.message).split('\n')[0]}`, 'warn');
         }
 
-        // 2. Collect image files, sorted for correct page order
-        const allFiles = fs.readdirSync(tmpDir)
-          .filter((f) => IMAGE_EXTS.has(path.extname(f).toLowerCase()))
-          .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-          .map((f) => path.join(tmpDir, f));
-
-        // Also collect any XML metadata files (e.g. ComicInfo.xml)
-        const xmlFiles = fs.readdirSync(tmpDir)
-          .filter((f) => path.extname(f).toLowerCase() === '.xml')
-          .map((f) => path.join(tmpDir, f));
+        // 2. Collect image files (whole tree), sorted for correct page order,
+        //    plus any XML metadata files (e.g. ComicInfo.xml).  Paths are
+        //    relative to tmpDir; mogrify and 7-Zip both run with cwd=tmpDir.
+        const tree     = collectTree(tmpDir);
+        const allFiles = tree.images;
+        const xmlFiles = tree.xml;
 
         if (allFiles.length === 0) {
           log('No image files found — skipped.', 'skip');
@@ -271,7 +340,7 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         //    (for PNG/GIF/BMP/WebP).  All reads run concurrently via Promise.all.
         const dims = new Map();
         await Promise.all(allFiles.map(async (f) => {
-          const d = await getDimensions(f);
+          const d = await getDimensions(path.join(tmpDir, f));
           if (d) dims.set(f, d);
         }));
 
@@ -291,14 +360,14 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         log(`${oversized.length} / ${allFiles.length} page(s) exceed ${MAX_LONG_SIDE}px — resizing…`, 'info');
 
         // 4. Mogrify oversized pages in-place (never upscales — ">" flag).
-        //    Use basenames + cwd so the command line never contains long image
-        //    paths (internal CBZ filenames can also exceed MAX_PATH when joined
-        //    with a temp dir prefix).
+        //    Use tmpDir-relative paths + cwd so the command line never contains
+        //    long image paths (internal CBZ filenames can also exceed MAX_PATH
+        //    when joined with a temp dir prefix).
         //    Batch into groups of BATCH_SIZE to stay under the Windows
         //    32 767-character command-line limit for large artbooks.
         for (let b = 0; b < oversized.length; b += BATCH_SIZE) {
           if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
-          const batch = oversized.slice(b, b + BATCH_SIZE).map((f) => path.basename(f));
+          const batch = oversized.slice(b, b + BATCH_SIZE);
           await execFilePromise(
             imageMagick,
             ['mogrify', '-resize', `${MAX_LONG_SIDE}x${MAX_LONG_SIDE}>`, '-quality', String(QUALITY), ...batch],
@@ -307,11 +376,11 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
           );
         }
 
-        // 5. Pack all pages (+ any XML metadata files) into a new temp CBZ via 7-Zip store mode
+        // 5. Pack all pages (+ any XML metadata files) into a new temp CBZ via
+        //    7-Zip store mode.  Relative paths keep the original folder tree.
         tmpCbz = path.join(os.tmpdir(), `cbz_resized_${crypto.randomBytes(6).toString('hex')}.cbz`);
-        const basenames = [...allFiles, ...xmlFiles].map((f) => path.basename(f));
         const listPath  = path.join(tmpDir, '.cbzpack.lst');
-        fs.writeFileSync(listPath, basenames.join('\n'), 'utf8');
+        fs.writeFileSync(listPath, listFileContent([...allFiles, ...xmlFiles]), 'utf8');
         try {
           await execFilePromise(
             sevenZip,
@@ -331,8 +400,13 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
           try { fs.unlinkSync(listPath); } catch {}
         }
 
-        // 6. Validate the new CBZ
-        const { valid, reason } = await validateCbz(tmpCbz, allFiles.length);
+        // 6. Validate the new CBZ against the ORIGINAL CBZ's own image-entry
+        //    count — not against what we extracted.  Checking against the
+        //    extracted set could never see an extraction shortfall, so a
+        //    page-stripped copy validated and was offered to replace the
+        //    original.
+        const sourceImageCount = await countImageEntries(longPath(cbzPath), signal);
+        const { valid, reason } = await validateCbz(tmpCbz, sourceImageCount);
         if (!valid) {
           log(`Validation failed: ${reason}`, 'error');
           try { await fs.promises.unlink(tmpCbz); } catch {}
@@ -359,6 +433,9 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
           if (tmpCbz) try { await fs.promises.unlink(tmpCbz); } catch {}
           return; // let worker exit cleanly; abort is detected at top of next iteration
         }
+        // A failure after packing (e.g. listing the original for its page
+        // count) must not leave the unvalidated repack behind.
+        if (tmpCbz) try { await fs.promises.unlink(tmpCbz); } catch {}
         const reason = err.stderr?.trim() || err.message;
         log(`ERROR: ${reason}`, 'error');
         errors.push({ file: cbzPath, reason });
@@ -396,4 +473,4 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
   return { resized, skipped, errors, totalSavedBytes };
 }
 
-module.exports = { startResize };
+module.exports = { startResize, replaceWithResized };
