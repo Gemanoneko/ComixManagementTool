@@ -36,4 +36,18 @@ function avoidDeviceName(name) {
   return stem + '_' + (rest.trim() === '' ? '' : rest);
 }
 
-module.exports = { isDeviceName, avoidDeviceName };
+/**
+ * The name for a folder the app creates from another name (an archive's name
+ * without its extension, an ext-folder's name without its extension).
+ * Ordinary Windows paths drop trailing spaces and periods, so Explorer and
+ * most programs can't open a folder named "Foo " or "Vol 2.".  The trailing
+ * run is dropped, as avoidDeviceName drops trailing spaces ("LPT9 " →
+ * "LPT9_"); then the device rule applies; nothing left → `_`.  The fix flow's
+ * rename does the same in its default mode (sanitizeName, 'remove').
+ *   "Foo " → "Foo", "Vol. 2." → "Vol. 2", "nul." → "nul_", " " → "_".
+ */
+function safeFolderName(name) {
+  return avoidDeviceName(name.replace(/[ .]+$/, '')) || '_';
+}
+
+module.exports = { isDeviceName, avoidDeviceName, safeFolderName };

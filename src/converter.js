@@ -8,7 +8,7 @@ const { validateCbz, countImageEntries } = require('./validator');
 const { buildOutputName } = require('./renamer');
 const { getSevenZip, getImageMagick } = require('./tools');
 const { tempRoot } = require('./temp');
-const { avoidDeviceName } = require('./winname');
+const { avoidDeviceName, safeFolderName } = require('./winname');
 const crypto = require('crypto');
 
 const PDF_DPI = 170;
@@ -709,8 +709,10 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
       const packed = await packTreeOutput([...subImages, ...subXml], subImages.length, cbzPath, 'Packing', log, signal, tree);
       if (packed) outputs.push(packed);
     } else {
-      // Intermediate folder — create matching output subdir and recurse
-      const subOut = path.join(outDir, avoidDeviceName(sub.name));
+      // Intermediate folder — create matching output subdir and recurse.
+      // safeFolderName: no trailing space/period, no device name (7-Zip
+      // already writes a trailing space or period as "_" when it extracts).
+      const subOut = path.join(outDir, safeFolderName(sub.name));
       fs.mkdirSync(subOut, { recursive: true });
       const subOutputs = await processDirectoryTree(subSrc, subOut, isManga, log, signal, waitIfPaused, tree);
       outputs.push(...subOutputs);
@@ -1030,7 +1032,10 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
     const contentDir = getEffectiveContentDir(tmpDir, baseName);
 
     if (isComplexStructure(contentDir)) {
-      const wrapperOutDir = path.join(outDir, avoidDeviceName(baseName));
+      // "Foo .zip" → "Foo\", "nul.zip" → "nul_\" (src/winname.js safeFolderName).
+      // A folder of that name that is already there is used as it is, as for
+      // any other archive; the CBZ names inside are claimed per run.
+      const wrapperOutDir = path.join(outDir, safeFolderName(baseName));
       fs.mkdirSync(wrapperOutDir, { recursive: true });
       log(`  Hierarchical structure — processing into ${path.basename(wrapperOutDir)}/`, 'info');
       const tree      = { claims, pagesDone: 0, failures: [], skipped: 0 };
@@ -1063,7 +1068,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
         // Every output already existed and validated this run (a re-run):
         // "skipped (CBZ already exists)", not a failure.
         if (tree.skipped > 0) {
-          return { success: false, outcome: 'allSkipped', outputs: [], folderName: baseName, isPdf, pdfPages };
+          return { success: false, outcome: 'allSkipped', outputs: [], folderName: path.basename(wrapperOutDir), isPdf, pdfPages };
         }
         log('  WARNING: No output produced from hierarchical archive', 'warn');
         return { success: false, outcome: 'noImages', failure: { cause: 'no-images' }, isPdf, pdfPages };
@@ -1072,7 +1077,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       // validation this run, so an explicit flag lets callers (e.g. the
       // renderer's single-file flow) gate delete-original on more than just
       // `success`.
-      return { success: true, validated: true, outcome: 'hierarchical', outputs, folderName: baseName, isPdf, pdfPages };
+      return { success: true, validated: true, outcome: 'hierarchical', outputs, folderName: path.basename(wrapperOutDir), isPdf, pdfPages };
     }
 
     // 3. Simple structure → image / folder packing
@@ -1088,7 +1093,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
     // Single-output stays flat alongside the original archive.
     let groupOutDir = outDir;
     if (groups.length > 1) {
-      groupOutDir = path.join(outDir, avoidDeviceName(baseName));
+      groupOutDir = path.join(outDir, safeFolderName(baseName));   // as the wrapper folder above
       fs.mkdirSync(groupOutDir, { recursive: true });
       log(`  Split into ${groups.length} archives → ${path.basename(groupOutDir)}\\`, 'info');
     }
@@ -1152,7 +1157,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
 
     const outcome    = outputs.length === 0 ? 'allSkipped'
       : outputs.length === 1 ? 'single' : 'multi';
-    const folderName = groups.length > 1 ? baseName : null;
+    const folderName = groups.length > 1 ? path.basename(groupOutDir) : null;   // the folder as created
     // validated:true only when an output was produced this run (i.e. it went
     // through packAndValidate); every group skipped as "exists" validated this
     // run too (checkExistingOutput), or the archive failed above.

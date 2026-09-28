@@ -19,7 +19,7 @@ const { getSevenZip } = require('./tools');
 const { validateCbz, testIntegrity, listEntries, compareEntries } = require('./validator');
 const { sizePair } = require('./format');
 const { tempRoot } = require('./temp');
-const { isDeviceName, avoidDeviceName } = require('./winname');
+const { isDeviceName, avoidDeviceName, safeFolderName } = require('./winname');
 
 const ARCHIVE_FOLDER_EXTS = new Set(['.cbr', '.cbz', '.rar', '.zip']);
 const IMAGE_EXTS           = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif']);
@@ -33,10 +33,12 @@ function naturalSort(a, b) {
 
 /**
  * Find a non-conflicting folder path (strips ext from baseName, then adds (1)…).
- * A Windows device name ("Aux") gets Judy's `_` rule first ("Aux_").
+ * The name is made safe first (src/winname.js safeFolderName): no trailing
+ * spaces or periods ("Foo .rar" → "Foo"), and Judy's `_` rule for a device
+ * name ("Aux" → "Aux_").
  */
 function resolveTargetFolder(parentDir, baseName) {
-  baseName = avoidDeviceName(baseName);
+  baseName = safeFolderName(baseName);
   const base = path.join(parentDir, baseName);
   if (!fs.existsSync(base)) return base;
   let n = 1;
@@ -261,7 +263,8 @@ async function scanExtFolders(rootDir, log, sendProgress, signal) {
         parentDir,
         targetPath,
         targetRel,
-        conflict: path.basename(targetPath) !== baseName,
+        // A real conflict only: the naming rule alone ("Foo " → "Foo") is not one.
+        conflict: path.basename(targetPath) !== safeFolderName(baseName),
       });
     } else {
       const imageCount = countImages(folderPath);
@@ -746,10 +749,11 @@ function applyRenameFolders(rootDir, groups, log) {
     const { folderPath, folderRel, baseName, parentDir } = group;
     const targetPath = resolveTargetFolder(parentDir, baseName);
     const targetRel  = path.relative(rootDir, targetPath);
-    const conflict   = path.basename(targetPath) !== baseName;
+    const wanted     = safeFolderName(baseName);               // "Foo .rar" → "Foo"
+    const conflict   = path.basename(targetPath) !== wanted;   // a real conflict, not the naming rule
 
     if (conflict) {
-      log(`  Note: "${baseName}" already exists — renaming to "${path.basename(targetPath)}"`, 'warn');
+      log(`  Note: "${wanted}" already exists — renaming to "${path.basename(targetPath)}"`, 'warn');
     }
 
     try {

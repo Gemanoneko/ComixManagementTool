@@ -13,7 +13,7 @@ const path = require('path');
 const { execFilePromise } = require('./exec');
 const { sevenZipArgs }    = require('./seven-zip');
 const { getSevenZip } = require('./tools');
-const { avoidDeviceName } = require('./winname');
+const { safeFolderName } = require('./winname');
 
 const ARCHIVE_ENTRY_EXTS = new Set(['.cbr', '.cbz', '.rar', '.zip']);
 
@@ -94,12 +94,13 @@ async function collectCbzFiles(rootDir, signal) {
 /**
  * Find a non-conflicting target folder path.
  * If "BaseName" exists, tries "BaseName (1)", "BaseName (2)", …
- * A Windows device name ("con") gets Judy's `_` rule first ("con_"), as
- * folder-pack and Convert do (src/winname.js): a folder named "con" can't be
- * opened through ordinary Windows paths.
+ * The name is made safe first (src/winname.js safeFolderName), as folder-pack
+ * and Convert do: no trailing spaces or periods ("Foo .cbz" → "Foo"), and
+ * Judy's `_` rule for a device name ("con" → "con_").  Ordinary Windows paths
+ * can't open a folder named "Foo " or "con".
  */
 function resolveTargetFolder(parentDir, baseName) {
-  baseName = avoidDeviceName(baseName);
+  baseName = safeFolderName(baseName);
   const base = path.join(parentDir, baseName);
   if (!fs.existsSync(base)) return base;
   let n = 1;
@@ -203,7 +204,7 @@ async function applyUnwrap(rootDir, groups, log, sendProgress, signal) {
       continue;
     }
 
-    const numbered = path.basename(targetFolder) !== avoidDeviceName(baseName);   // a real conflict, not the `_` rule
+    const numbered = path.basename(targetFolder) !== safeFolderName(baseName);   // a real conflict, not the naming rule
     log(
       `Extracting: ${cbzRel}  →  ${targetFolderRel}` + (numbered ? '  (renamed to avoid conflict)' : ''),
       'info'

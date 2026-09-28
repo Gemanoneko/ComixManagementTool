@@ -36,6 +36,50 @@ function longPath(p) {
 }
 
 /**
+ * The name 7-Zip gives an archive path when it extracts on Windows: a name
+ * can't end in a space or a period there, so 7-Zip writes each such trailing
+ * character as "_" — "Vol 1 \001.jpg" lands as "Vol 1_\001.jpg", "notes.txt "
+ * as "notes.txt_".  (7-Zip has no switch to turn this off.)  A name made
+ * only of spaces and periods ("..", "   ") is left as it is: 7-Zip treats
+ * those differently, and such an archive keeps failing the exact-copy check.
+ */
+function extractedPath(p) {
+  return p.split('\\').map((c) => c.replace(/([^ .])([ .]+)$/, (_, last, run) => last + '_'.repeat(run.length))).join('\\');
+}
+
+/**
+ * The renames that give a repack its original's entry names back:
+ * [packed path, original path] for every entry of the original that was
+ * extracted only under 7-Zip's name for it (extractedPath).  Nothing is
+ * guessed: a pair is made only when that name is in the repack, and never when
+ * two entries of the original land on the same name ("Vol 1 \" and "Vol 1_\"
+ * both extract into "Vol 1_\") — 7-Zip merged those, and the exact-copy check
+ * must fail.  Windows names are case-insensitive, so the lookups are too.
+ *
+ * @param {Array<{path: string}>} sourceEntries  the original's listing
+ * @param {string[]} packedPaths                 paths in the repack, relative
+ * @returns {Array<[string, string]>}
+ */
+function restoreNamePairs(sourceEntries, packedPaths) {
+  const norm   = (p) => p.replace(/\//g, '\\').replace(/\\+$/, '');
+  const packed = new Map(packedPaths.map((p) => [p.toLowerCase(), p]));
+  const lands  = new Map();                        // name on disk (lower) → how many originals land there
+  for (const e of sourceEntries) {
+    const k = extractedPath(norm(e.path)).toLowerCase();
+    lands.set(k, (lands.get(k) || 0) + 1);
+  }
+  const pairs = [];
+  for (const e of sourceEntries) {
+    const want = norm(e.path);
+    const got  = extractedPath(want);
+    if (got === want || packed.has(want.toLowerCase()) || /["\r\n]/.test(want)) continue;   // " / newline: no listfile line
+    const k = got.toLowerCase();
+    if (packed.has(k) && lands.get(k) === 1) pairs.push([packed.get(k), want]);
+  }
+  return pairs;
+}
+
+/**
  * Recursively list everything under `root`, returning paths RELATIVE to root.
  * Returns { images, others, emptyDirs }:
  *   images     – page files, naturally sorted by relative path so pages keep
@@ -350,8 +394,10 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         //      every entry that is not a page (.jxl, .jfif, .txt, ComicInfo.xml,
         //      empty folders, …) must be carried over unchanged.  The old
         //      image-only filter silently dropped them from the replacement.
-        //      An entry that cannot be extracted as-is on Windows (a file and
-        //      a folder with the same name, an unsafe or illegal name that
+        //      A name ending in a space or a period is extracted as "_" and
+        //      gets its name back inside the repack (step 6b).  Any other
+        //      entry that cannot be extracted as-is on Windows (a file and a
+        //      folder with the same name, an unsafe or illegal name that
         //      7-Zip renames) makes this CBZ fail — at 7-Zip here, or at the
         //      step 6 comparison — and the original stays untouched.
         //    • longPath() adds \\?\ so 7-Zip can open CBZs whose full path
@@ -443,8 +489,9 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         //    could overwrite an archive entry of the same name, and it would
         //    itself be packed as an entry.
         tmpCbz = path.join(tempRoot(), `cbz_resized_${crypto.randomBytes(6).toString('hex')}.cbz`);
-        const listPath  = `${tmpDir}.lst`;
-        fs.writeFileSync(listPath, listFileContent([...allFiles, ...tree.others, ...tree.emptyDirs]), 'utf8');
+        const listPath    = `${tmpDir}.lst`;
+        const packedPaths = [...allFiles, ...tree.others, ...tree.emptyDirs];
+        fs.writeFileSync(listPath, listFileContent(packedPaths), 'utf8');
         try {
           await execFilePromise(
             sevenZip,
@@ -485,10 +532,28 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
           };
           throw err;
         }
+        // 6b. An entry 7-Zip had to extract under another name (a name ending
+        //     in a space or a period: "Vol 1 \001.jpg" lands as
+        //     "Vol 1_\001.jpg" — extractedPath) was packed under that name.
+        //     Rename it back inside the repack, so the replacement's entry
+        //     names are the original's, exactly; the exact-copy check below
+        //     then holds the repack to them.  Nothing to do for almost every CBZ.
+        const renames = restoreNamePairs(sourceEntries, packedPaths);
+        if (renames.length > 0) {
+          const rnList = `${tmpDir}.rn.lst`;       // beside tmpDir, like the pack listfile
+          fs.writeFileSync(rnList, listFileContent(renames.flat()), 'utf8');
+          try {
+            await execFilePromise(sevenZip, sevenZipArgs('rn', ['-spd', `@${rnList}`], tmpCbz), signal);
+          } finally {
+            try { fs.unlinkSync(rnList); } catch {}
+          }
+        }
+        const restored = new Map(renames);
+        const changed  = oversized.map((p) => restored.get(p) ?? p);   // resized pages, by their original names
         let { valid, reason } = await validateCbz(tmpCbz, sourceImageCount);
         if (valid) {
           const outputEntries = await listEntries(tmpCbz, signal);
-          ({ valid, reason } = compareEntries(sourceEntries, outputEntries, oversized));
+          ({ valid, reason } = compareEntries(sourceEntries, outputEntries, changed));
         }
         if (!valid) {
           log(`Validation failed: ${reason}`, 'error');
