@@ -1234,9 +1234,15 @@ async function findOrphanedOriginals(rootDir) {
     for (const name of byExt.src) {
       // likelyCbzMatches below costs one normalisation per CBZ in the folder.
       await maybeYield(1 + byExt.cbzNames.length);
-      const base    = normaliseForMatch(path.basename(name, path.extname(name)));
+      const stem    = path.basename(name, path.extname(name));
+      const base    = normaliseForMatch(stem);
       const full    = path.join(dir, name);
-      const cbzName = byExt.cbzByNorm.get(base); // actual CBZ filename (may differ in spacing)
+      // Actual CBZ filename (may differ in spacing).  An output named with
+      // Judy's `_` rule — "nul.zip" converts to "nul_.cbz" (src/winname.js) —
+      // is still this source's own .cbz, so a re-run offers "nul.zip" as
+      // pre-existing instead of sending it to manual review.
+      const cbzName = byExt.cbzByNorm.get(base)
+        ?? byExt.cbzByNorm.get(normaliseForMatch(avoidDeviceName(stem)));
       if (cbzName) {
         // Normalised match: source + matching CBZ → safe to flag only if CBZ is readable
         const cbzPath = path.join(dir, cbzName);

@@ -30,7 +30,10 @@ function isDeviceName(name) {
 function avoidDeviceName(name) {
   if (!isDeviceName(name)) return name;
   const stem = deviceStem(name);
-  return stem + '_' + name.slice(stem.length);
+  const rest = name.slice(stem.length);
+  // Spaces with nothing after them ("LPT9 " from "LPT9 .cbz") are dropped:
+  // kept, they would leave a name ending in a space ("LPT9_ ").
+  return stem + '_' + (rest.trim() === '' ? '' : rest);
 }
 
 module.exports = { isDeviceName, avoidDeviceName };

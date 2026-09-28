@@ -16,6 +16,9 @@ const IMAGE_EXTS    = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp',
 const MAX_LONG_SIDE = 4500;
 const QUALITY       = 90;
 const BATCH_SIZE    = 50;
+// Room for mogrify's page arguments on one command line (Windows allows 32 767
+// characters in all; the rest is the executable and the switches).
+const MAX_CMDLINE   = 30000;
 // Process this many CBZ files concurrently. Each worker holds one temp dir on
 // disk at a time, so keep this conservative to avoid saturating the drive.
 const CONCURRENCY   = Math.min(os.cpus().length, 4);
@@ -407,21 +410,31 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         log(`${oversized.length} / ${allFiles.length} page(s) exceed ${MAX_LONG_SIDE}px — resizing…`, 'info');
 
         // 4. Mogrify oversized pages in-place (never upscales — ">" flag).
-        //    Use tmpDir-relative paths + cwd so the command line never contains
-        //    long image paths (internal CBZ filenames can also exceed MAX_PATH
-        //    when joined with a temp dir prefix).
-        //    Batch into groups of BATCH_SIZE to stay under the Windows
-        //    32 767-character command-line limit for large artbooks.
-        for (let b = 0; b < oversized.length; b += BATCH_SIZE) {
-          if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
-          const batch = oversized.slice(b, b + BATCH_SIZE);
+        //    Absolute \\?\ paths: ImageMagick opens a long ABSOLUTE path, but
+        //    not a RELATIVE one whose full path (working folder + page path)
+        //    passes MAX_PATH — a page in a deeply nested archive failed with
+        //    "unable to open image".  A batch ends at BATCH_SIZE pages or before
+        //    the command line would pass MAX_CMDLINE characters (Windows allows
+        //    32 767), whichever comes first.
+        let batch = [], batchLen = 0;
+        const runBatch = async () => {
+          if (batch.length === 0) return;
           await execFilePromise(
             imageMagick,
             ['mogrify', '-resize', `${MAX_LONG_SIDE}x${MAX_LONG_SIDE}>`, '-quality', String(QUALITY), ...batch],
             signal,
             { cwd: tmpDir }
           );
+          batch = []; batchLen = 0;
+        };
+        for (const rel of oversized) {
+          if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+          const page = longPath(path.join(tmpDir, rel));
+          if (batch.length >= BATCH_SIZE || (batch.length > 0 && batchLen + page.length + 3 > MAX_CMDLINE)) await runBatch();
+          batch.push(page);
+          batchLen += page.length + 3;          // the argument plus quotes and a space
         }
+        await runBatch();
 
         // 5. Pack all pages + everything carried over into a new temp CBZ via
         //    7-Zip store mode.  Relative paths keep the original folder tree.
