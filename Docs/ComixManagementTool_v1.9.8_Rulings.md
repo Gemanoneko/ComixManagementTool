@@ -96,3 +96,76 @@ A folder that has both rename-fixable and unfixable records never moves to the R
 
 ### Hit areas
 Controls are at least 24×24 CSS px (32–40 is comfortable) and must not overlap sibling rows at any width. Measure this once it's built.
+
+## Convert and Resize end-of-run error block — Judy's spec (ruling 15)
+
+**Plurals:** every new string uses a correct singular or plural (`1 file` / `2 files`), never `(s)`. This is Judy's own earlier ruling. Leave existing unchanged lines alone.
+
+### Shared shape (the same as folder-pack's `logFailureSummary`)
+```
+<n> <noun> failed to <verb>:              ← 'header'
+  "<rel path>" — <message>                ← 'error', with an Open Folder button
+    Fix: <fix>                            ← 'info'
+```
+- The indents are 2 and 4 spaces.
+- The block appears once, on a normal (not cancelled) completion only. It is text only: no fix panel.
+- **Open Folder for these rows:** label `Open Folder`, action `shell:openFolder` (highlights the file), tooltip **"Show this file in Explorer"**. Reuse the string at `renderer/app.js:1193`.
+- `appendLog` needs a mode flag for `shell:openFolder`, defaulting to today's `shell:openPath`, so folder-pack's calls stay unchanged.
+
+### Convert (`src/converter.js`)
+- **Order:** `logSummary` (unchanged), then the new `logConvertFailureSummary`, then the completion line. The two first steps run only when not aborted.
+- **Completion line with failures:** `Done. <c> of <n> files converted, <f> failed (see failures above).`
+- **The other completion lines are unchanged:** `Stopped. …` and `… converted successfully.`
+- **Entry identity:** `path.relative(rootFolder, file)`.
+
+| Cause | Message | Fix |
+|---|---|---|
+| 7-Zip missing | `7-Zip is missing from this install — it can't extract this file.` | Reinstall the app, then convert again. |
+| ImageMagick missing | `ImageMagick isn't installed — it's needed to convert PDF pages.` | Install ImageMagick 7 from imagemagick.org, then convert this file again. |
+| Unsafe path inside archive | `"<file>" has a page name that points outside its own folder — treated as unsafe, not converted.` | Get a clean copy of this file, then convert it again. |
+| Fatal 7-Zip error | first non-empty line of 7-Zip's stderr, verbatim | Convert it again — if it keeps failing, the file itself may be corrupt. |
+| Fatal ImageMagick error | first non-empty line of ImageMagick's stderr, verbatim | Convert it again — if it keeps failing, check that the PDF isn't password-protected or corrupt. |
+| No images found | `No pages were found inside this file.` | Open it and check it actually holds image pages. |
+| CBZ integrity test failed | `"<name>.cbz" failed an integrity check.` | Convert it again. |
+| CBZ unreadable after packing | `Couldn't read back "<name>.cbz" to check it.` | Convert it again — if it keeps failing, close anything that has the file open. |
+| CBZ has zero pages | `"<name>.cbz" was created with no pages in it.` | Convert it again. |
+| Page-count mismatch | `"<name>.cbz" should hold <expected> pages but has <found>.` (singular or plural) | Convert it again. |
+| Existing output doesn't validate | `An existing "<name>.cbz" doesn't match this file — <inner reason>.` | Move or delete the existing "<name>.cbz" yourself, then convert this file again. |
+| Nested archive not validated | `"<nested name>" inside this file didn't convert or validate.` + ` (+N more)` | Convert this file again — if it keeps failing, convert "<nested name>" on its own to see the detailed error. |
+| Pages lost (hierarchical) | `<lost> of <total> pages aren't in a validated CBZ.` (singular or plural) | Convert this file again. |
+
+### Resize (`src/resizer.js`)
+- **Placement:** after the worker pool settles and after the existing aborted early return, so a cancelled run is unchanged. Then comes the existing `Ready — …` line, then the new `logResizeFailureSummary`.
+- **Remove** the old line: `<n> file(s) failed — see above for details.`
+- **Entry identity:** `path.relative(folder, cbzPath)`.
+- The existing `validateCbz` / `compareEntries` reasons are used **verbatim** as the message. Every one of them gets the Fix `Resize it again.`:
+  - `Archive integrity test failed (corrupt ZIP or CRC error)`
+  - `Cannot list archive contents`
+  - `CBZ contains no image files`
+  - `Image count mismatch: …`
+  - `Missing from resized copy: …`
+  - `Size differs in resized copy: …`
+  - `Content differs in resized copy: …`
+  - `Unexpected in resized copy: …`
+  - `Folder missing from resized copy: …`
+  - `Unexpected folder in resized copy: …`
+- **Failure reading the original CBZ** for the comparison:
+  - message `"<name>.cbz" can't be read to check the resize against it.`
+  - Fix `Check that the file isn't corrupt or in use, then resize it again.`
+  - This replaces today's raw exec error.
+- **Any other fatal 7-Zip or ImageMagick error:**
+  - message: the first non-empty stderr line, not the whole `err.stderr || err.message`
+  - Fix `Resize it again — if it keeps failing, check that the file isn't corrupt, in use, or password-protected.`
+- **Renderer `resize:complete`,** in the branch where no resize was needed: `Done — <k> files already within 4 500 px<, <e> failed (see failures above)>.` Drop the old `, N error(s)` clause.
+
+## Folder-pack wording verdicts (Judy)
+1. **The four name-cause messages get the `${more}` suffix** (" (+N more)"), like the other causes.
+2. **Size message:** if `formatBytes` would print the two sizes identically, show exact bytes instead: `"<f>" is <a> bytes in the folder but <b> bytes in the CBZ.<more>`
+3. **`Failed: <folderRel>` stays unindented.** It pairs with `Converting: …`.
+4. **Placeholders:**
+   - **Empty subfolder:** gets its own case. Keep the message; Fix `Add at least one file to "<subfolder>" — or delete the empty subfolder — then pack the folder again.`
+   - **Link or special file:** gets its own case. Keep the message; Fix `Replace "<name>" with a regular file or folder, then pack the folder again.`
+   - **Keep verbatim, in the default bucket:** `Unexpected in CBZ` / `Unexpected folder in CBZ` / `Content differs in CBZ`, `Invalid CBZ — <reason>`, and the first line of 7-Zip's error.
+   - **Keep:** `U+XXXX` for control characters.
+5. **Cancelled folder-pack:** `Cancelled — <c> folders converted before cancel<, <f> failed (see failures above)>.` Use correct singular and plural.
+   - Note: today `folderpack:convert` always sends `aborted: false`, because `applyConvertFolders` breaks out of the loop and returns normally. The flag must actually reflect `signal.aborted`.
