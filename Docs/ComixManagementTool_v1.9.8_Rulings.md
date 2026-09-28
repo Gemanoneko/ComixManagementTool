@@ -169,3 +169,11 @@ Controls are at least 24×24 CSS px (32–40 is comfortable) and must not overla
    - **Keep:** `U+XXXX` for control characters.
 5. **Cancelled folder-pack:** `Cancelled — <c> folders converted before cancel<, <f> failed (see failures above)>.` Use correct singular and plural.
    - Note: today `folderpack:convert` always sends `aborted: false`, because `applyConvertFolders` breaks out of the loop and returns normally. The flag must actually reflect `signal.aborted`.
+
+## More rulings (Sergei, later the same session)
+17. **Version: this release ships as v1.10.0**, not v1.9.8. It adds features (the fix panels), and the tool's rules say features get a minor bump. The file name of this doc keeps "v1.9.8" for history.
+18. **Fix panels for Convert and Resize: later, not in this release.** Text-only `Fix:` lines ship now. The interactive flow for Convert and Resize goes on the list for a future version.
+19. **Resize size messages carry the actual sizes.** They follow Judy's folder-pack size pattern, with "original" and "resized copy" in place of "folder" and "CBZ":
+    - `"<f>" is <a> in the original but <b> in the resized copy.<more>`
+    - When `formatBytes` would print the two sizes the same, use exact bytes: `… is <a> bytes in the original but <b> bytes in the resized copy.<more>`
+    - Judy checks this wording in her review of the build.
