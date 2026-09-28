@@ -9,6 +9,8 @@ const { execFilePromise } = require('./exec');
 const { sevenZipArgs, listFileContent } = require('./seven-zip');
 const { getSevenZip, getImageMagick } = require('./tools');
 const { validateCbz, countImageEntries, listEntries, compareEntries } = require('./validator');
+const { tempRoot } = require('./temp');
+const { formatBytes } = require('./format');
 
 const IMAGE_EXTS    = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif']);
 const MAX_LONG_SIDE = 4500;
@@ -28,14 +30,6 @@ function longPath(p) {
   if (process.platform !== 'win32' || !path.isAbsolute(p)) return p;
   if (p.startsWith('\\\\')) return p; // already UNC or \\?\
   return '\\\\?\\' + path.normalize(p);
-}
-
-function formatBytes(bytes) {
-  if (bytes <= 0)              return '0 B';
-  if (bytes < 1024)            return `${bytes} B`;
-  if (bytes < 1024 * 1024)     return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 ** 3)       return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
 /**
@@ -339,7 +333,7 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
       // m6: mkdtempSync is atomic and guaranteed unique — matches the
       // converter.js `cbz_` pattern and removes the manual-randomBytes +
       // mkdirSync race that could theoretically collide.
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cbz_resize_'));
+      const tmpDir = fs.mkdtempSync(path.join(tempRoot(), 'cbz_resize_'));
       let   tmpCbz = null;
 
       try {
@@ -435,7 +429,7 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         //    so the startup sweep still removes it after a crash): inside, it
         //    could overwrite an archive entry of the same name, and it would
         //    itself be packed as an entry.
-        tmpCbz = path.join(os.tmpdir(), `cbz_resized_${crypto.randomBytes(6).toString('hex')}.cbz`);
+        tmpCbz = path.join(tempRoot(), `cbz_resized_${crypto.randomBytes(6).toString('hex')}.cbz`);
         const listPath  = `${tmpDir}.lst`;
         fs.writeFileSync(listPath, listFileContent([...allFiles, ...tree.others, ...tree.emptyDirs]), 'utf8');
         try {
@@ -464,19 +458,29 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         //    b) an exact-copy check of both listings: same file paths, same
         //       folders, and the same size + CRC for every entry that was
         //       not resized — so nothing is dropped, renamed or altered.
-        const sourceImageCount = await countImageEntries(longPath(cbzPath), signal);
+        // Reading the ORIGINAL for the comparison is its own failure: the
+        // end-of-run block says so plainly instead of showing a raw exec error.
+        let sourceImageCount, sourceEntries;
+        try {
+          sourceImageCount = await countImageEntries(longPath(cbzPath), signal);
+          sourceEntries    = await listEntries(longPath(cbzPath), signal);
+        } catch (err) {
+          if (err.name === 'AbortError' || signal?.aborted) throw err;
+          err.resizeFailure = {
+            message: `"${path.basename(cbzPath)}" can't be read to check the resize against it.`,
+            fix: "Check that the file isn't corrupt or in use, then resize it again.",
+          };
+          throw err;
+        }
         let { valid, reason } = await validateCbz(tmpCbz, sourceImageCount);
         if (valid) {
-          const [sourceEntries, outputEntries] = await Promise.all([
-            listEntries(longPath(cbzPath), signal),
-            listEntries(tmpCbz, signal),
-          ]);
+          const outputEntries = await listEntries(tmpCbz, signal);
           ({ valid, reason } = compareEntries(sourceEntries, outputEntries, oversized));
         }
         if (!valid) {
           log(`Validation failed: ${reason}`, 'error');
           try { await fs.promises.unlink(tmpCbz); } catch {}
-          errors.push({ file: cbzPath, reason });
+          errors.push({ file: cbzPath, reason, message: reason, fix: 'Resize it again.' });
           tmpCbz = null;
           continue;
         }
@@ -504,7 +508,14 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         if (tmpCbz) try { await fs.promises.unlink(tmpCbz); } catch {}
         const reason = err.stderr?.trim() || err.message;
         log(`ERROR: ${reason}`, 'error');
-        errors.push({ file: cbzPath, reason });
+        // For the end-of-run block: only the first non-empty line of the
+        // 7-Zip / ImageMagick output, not all of it.
+        const first = String(err.stderr || '').split(/\r?\n/).map((l) => l.trim()).find(Boolean)
+          || String(err.message || '').split(/\r?\n/)[0];
+        errors.push({ file: cbzPath, reason, ...(err.resizeFailure || {
+          message: first,
+          fix: "Resize it again — if it keeps failing, check that the file isn't corrupt, in use, or password-protected.",
+        }) });
       } finally {
         try { await fs.promises.rm(tmpDir, { recursive: true, force: true }); } catch {}
         done++;
@@ -532,11 +543,26 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
   if (resized.length > 0) {
     sendLog(`\nReady — ${resized.length} file(s) to replace, ${formatBytes(totalSavedBytes)} to be freed.`, 'success');
   }
-  if (errors.length > 0) {
-    sendLog(`${errors.length} file(s) failed — see above for details.`, 'warn');
-  }
+  logResizeFailureSummary(errors, folder, sendLog);
 
   return { resized, skipped, errors, totalSavedBytes };
+}
+
+/**
+ * End-of-run failure block (Judy's spec, ruling 15 — the same shape as
+ * folder-pack's): a header, then per file `  "<rel>" — <message>` (Open
+ * Folder shows the file in Explorer) and `    Fix: <fix>`.  Not shown for a
+ * cancelled run (startResize returns before this).
+ */
+function logResizeFailureSummary(errors, folder, sendLog) {
+  if (errors.length === 0) return;
+  const n = errors.length;
+  sendLog(`${n} ${n === 1 ? 'file' : 'files'} failed to resize:`, 'header');
+  for (const e of errors) {
+    sendLog(`  "${path.relative(folder, e.file)}" — ${e.message || e.reason}`, 'error',
+      { path: e.file, title: 'Show this file in Explorer', mode: 'file' });
+    sendLog(`    Fix: ${e.fix || 'Resize it again.'}`, 'info');
+  }
 }
 
 module.exports = { startResize, replaceWithResized, sweepResizeLeftovers, formatBytes };

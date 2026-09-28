@@ -33,6 +33,13 @@ function execFilePromise(cmd, args, signal, execOpts = {}) {
         else     resolve({ stdout, stderr });
       }
     );
+    // A spawn that Windows refuses (e.g. a working directory of 259+
+    // characters) makes Node emit 'error' on the child's stdio pipes as well
+    // as on the child; nobody listened there, so a 260+ character cwd crashed
+    // the whole process with an uncaught "read ENOTCONN".  The real error
+    // (ENOENT) still reaches the callback above and rejects the promise.
+    child.stdout?.on('error', () => {});
+    child.stderr?.on('error', () => {});
     // Run at below-normal priority so games and other foreground apps
     // are never starved by ImageMagick / 7-Zip workers.
     try {

@@ -1036,6 +1036,59 @@ body {
   font-family: var(--sans);
 }
 
+/* ── Folder-pack fix flow (Names / Retry panels) ─────────────────────────── */
+.pack-fix-folder {
+  font-family: var(--mono);
+  font-size: .75rem;
+  color: var(--text-dim);
+  padding: 6px 2px 0;
+}
+/* Keep a trailing space visible inside the quotes */
+.pack-fix-name { white-space: pre; }
+.pack-fix-error {
+  flex-basis: 100%;
+  color: var(--error);
+  font-family: var(--sans);
+  font-size: .72rem;
+}
+.pack-fix-row .fix-group-actions { flex-wrap: wrap; justify-content: flex-end; }
+.pack-fix-retry-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: .78rem;
+}
+.pack-fix-retry-info .fix-group-from { font-family: var(--mono); font-size: .75rem; }
+.pack-fix-message { color: var(--error); }
+.pack-fix-fixline { color: var(--text); }
+
+/* Hit areas: at least 24 px tall (Judy's spec) */
+.pack-fix-row .fix-row-open,
+.pack-fix-mode button { min-height: 24px; }
+.pack-fix-row .fix-row-open:disabled { opacity: .4; cursor: not-allowed; }
+
+.pack-fix-mode { display: inline-flex; }
+.pack-fix-mode button {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  padding: 3px 9px;
+  font-size: .72rem;
+  font-family: var(--sans);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pack-fix-mode button:first-child { border-radius: 3px 0 0 3px; }
+.pack-fix-mode button:last-child  { border-radius: 0 3px 3px 0; border-left: none; }
+.pack-fix-mode button[aria-pressed="true"] {
+  background: var(--btn-fix-bg);
+  color: var(--btn-fix-fg);
+  border-color: var(--btn-fix-border);
+}
+.pack-fix-mode button:disabled { opacity: .4; cursor: not-allowed; }
+
 /* ── Update banner ─────────────────────────────────────────────────────── */
 .update-banner {
   background: var(--surface2);

@@ -395,6 +395,30 @@
           <div id="extDeletionList" class="bundle-deletion-list"></div>
         </section>
 
+        <!-- Ext-Folders: fix flow, bad names (Group A) — filled from convertComplete failures -->
+        <section class="panel fix-preview-panel hidden" id="packFixNamesPanel">
+          <div class="fix-preview-toolbar">
+            <span class="panel-title" id="packFixNamesSummary">Names to fix</span>
+            <div class="fix-preview-actions">
+              <button id="packFixAllBtn" class="btn btn-fix-apply" disabled
+                      title="Rename every listed file and folder to its shown new name.">Fix All</button>
+            </div>
+          </div>
+          <div id="packFixNamesList" class="fix-group-list"></div>
+        </section>
+
+        <!-- Ext-Folders: fix flow, pack again (Group B) -->
+        <section class="panel fix-preview-panel hidden" id="packFixRetryPanel">
+          <div class="fix-preview-toolbar">
+            <span class="panel-title" id="packFixRetrySummary">Folders to pack again</span>
+            <div class="fix-preview-actions">
+              <button id="packRetryAllBtn" class="btn btn-fix-apply" disabled
+                      title="Pack every listed folder again.">Retry All</button>
+            </div>
+          </div>
+          <div id="packFixRetryList" class="fix-group-list"></div>
+        </section>
+
       </div><!-- /tab-fix -->
 
       <!-- Shared log panel -->
@@ -440,6 +464,21 @@
                 title="Keep all original files — nothing will be deleted">Keep All</button>
         <button id="confirmDeleteBtn" class="btn btn-danger"
                 title="Permanently delete all listed original files">Delete All</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Folder-pack Fix All confirmation modal -->
+  <div id="packFixModal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h2 class="modal-title" id="packFixModalTitle">Rename Items?</h2>
+      <p class="modal-desc">Renaming can't be undone through this app. Review the list, then confirm.</p>
+      <div id="packFixModalList" class="delete-list"></div>
+      <div class="modal-actions">
+        <button id="packFixCancelBtn" class="btn btn-secondary"
+                title="Close without renaming anything.">Cancel</button>
+        <button id="packFixConfirmBtn" class="btn btn-danger"
+                title="Rename every listed item.">Rename All</button>
       </div>
     </div>
   </div>

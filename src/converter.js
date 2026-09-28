@@ -7,6 +7,7 @@ const { scanForFiles } = require('./scanner');
 const { validateCbz, countImageEntries } = require('./validator');
 const { buildOutputName } = require('./renamer');
 const { getSevenZip, getImageMagick } = require('./tools');
+const { tempRoot } = require('./temp');
 
 const PDF_DPI = 170;
 
@@ -57,13 +58,22 @@ function formatEta(ms) {
 }
 
 function makeTempDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'cbz_'));
+  return fs.mkdtempSync(path.join(tempRoot(), 'cbz_'));
 }
 
 async function removeTempDir(dir) {
   try {
     await fs.promises.rm(dir, { recursive: true, force: true });
   } catch { /* best effort */ }
+}
+
+/**
+ * Tag an error with the Convert end-of-run summary's cause code
+ * (logConvertFailureSummary) — unless it already has one.
+ */
+function withCause(err, cause) {
+  if (err && typeof err === 'object' && !err.convertCause) err.convertCause = cause;
+  return err;
 }
 
 /**
@@ -149,7 +159,7 @@ function isInsideDir(root, candidate) {
 // (empty array on a clean extraction).  Throws on fatal errors.
 async function extractArchive(srcFile, destDir, signal) {
   const sevenZip = getSevenZip();
-  if (!sevenZip) throw new Error('7-Zip not found. Install 7-Zip or run "npm run prepare-vendor".');
+  if (!sevenZip) throw withCause(new Error('7-Zip not found. Install 7-Zip or run "npm run prepare-vendor".'), '7zip-missing');
 
   try {
     await execFilePromise(sevenZip, sevenZipArgs('x', [`-o${destDir}`, '-y'], srcFile), signal);
@@ -173,7 +183,7 @@ async function extractArchive(srcFile, destDir, signal) {
     const nonCrcError = (err.stderr || '').split(/\r?\n/).some(
       (l) => /^error:/i.test(l.trim()) && !/CRC Failed/i.test(l),
     );
-    if (nonCrcError || crcNames.length === 0) throw err;
+    if (nonCrcError || crcNames.length === 0) throw withCause(err, '7zip-error');
 
     // Each <name> is the RAW entry name from the untrusted archive.  7-Zip
     // strips `..` / drive prefixes when it writes an entry, so the corrupt
@@ -187,7 +197,7 @@ async function extractArchive(srcFile, destDir, signal) {
     const root     = path.resolve(destDir);
     const crcPaths = crcNames.map((name) => path.resolve(root, name));
     if (crcPaths.some((full) => !isInsideDir(root, full))) {
-      throw new Error('Unsafe file path inside archive');
+      throw withCause(new Error('Unsafe file path inside archive'), 'unsafe-path');
     }
 
     // Delete the bad extracts so they don't end up in the output CBZ.
@@ -280,7 +290,7 @@ async function getPdfPageCount(pdfPath, signal) {
  */
 async function extractPdf(srcFile, destDir, totalPages, signal, onPageProgress, log) {
   const imageMagick = getImageMagick();
-  if (!imageMagick) throw new Error('ImageMagick not found. Install ImageMagick 7 from imagemagick.org.');
+  if (!imageMagick) throw withCause(new Error('ImageMagick not found. Install ImageMagick 7 from imagemagick.org.'), 'magick-missing');
 
   const baseName   = path.basename(srcFile, path.extname(srcFile));
   const outPattern = path.join(destDir, `${baseName}_%04d.jpg`);
@@ -628,11 +638,13 @@ function isComplexStructure(dir) {
  *   pagesDone  – images of this tree now in a CBZ that validated this run
  *                (freshly packed, or an existing one that re-validated)
  *   failures   – nested archives that were not converted and validated
+ *   skipped    – outputs (and nested archives) skipped because they already
+ *                existed and validated this run
  * processFile compares pagesDone with the tree's image count and fails the
  * archive on any shortfall or nested failure.
  */
 async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIfPaused = null, tree = null) {
-  tree ??= { claims: new Set(), pagesDone: 0, failures: [] };
+  tree ??= { claims: new Set(), pagesDone: 0, failures: [], skipped: 0 };
   let entries;
   try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return []; }
 
@@ -661,8 +673,10 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
       const result = await processFile(archive, isManga, log, signal, outDir, waitIfPaused, tree.claims);
       if (result.success && result.outputs) outputs.push(...result.outputs);
       // A nested archive that did not convert and validate fails the bundle:
-      // the bundle is the only other copy of its pages.
-      if (!result.success) tree.failures.push(base);
+      // the bundle is the only other copy of its pages.  One whose outputs
+      // all exist and validated this run ('allSkipped', a re-run) is done.
+      if (result.outcome === 'allSkipped') tree.skipped++;
+      else if (!result.success) tree.failures.push(base);
     }
   }
 
@@ -726,6 +740,7 @@ async function packTreeOutput(files, imageCount, cbzPath, packLabel, log, signal
     if (existing.state === 'valid') {
       log(`  SKIP (exists): ${name}`, 'skip');
       tree.pagesDone += imageCount;
+      tree.skipped++;
       return null;
     }
     if (existing.state === 'mismatch') {
@@ -780,6 +795,7 @@ async function copyNestedCbz(archive, outDir, log, signal, tree) {
     const existing = await checkExistingOutput(dst, expected, signal);
     if (existing.state === 'valid') {
       log(`  SKIP (exists): ${name}`, 'skip');
+      tree.skipped++;
       return null;
     }
     if (existing.state === 'mismatch') return fail(`Existing ${name} failed validation — ${existing.reason}`);
@@ -836,6 +852,7 @@ async function copyNestedCbz(archive, outDir, log, signal, tree) {
  */
 async function packToCbz(imageFiles, outputPath, signal) {
   const sevenZip = getSevenZip();
+  if (!sevenZip) throw withCause(new Error('7-Zip not found — cannot pack CBZ'), '7zip-missing');
   // All files in a single pack call are in the same directory (CBZ is flat).
   const srcDir   = path.dirname(imageFiles[0]);
   const basenames = imageFiles.map((f) => path.basename(f));
@@ -865,7 +882,8 @@ async function packToCbz(imageFiles, outputPath, signal) {
   } catch (err) {
     // Delete any partial .tmp so it doesn't linger as a stale orphan.
     try { fs.unlinkSync(tmpOutputPath); } catch { /* ignore — may not exist yet */ }
-    throw err;
+    if (err.name === 'AbortError' || signal?.aborted) throw err;
+    throw withCause(err, '7zip-error');
   } finally {
     try { fs.unlinkSync(listPath); } catch { /* ignore */ }
   }
@@ -881,15 +899,17 @@ async function packToCbz(imageFiles, outputPath, signal) {
  * already handled the skip-if-exists / unlink-unreadable branches before
  * invoking this helper, so `outputPath` is guaranteed absent when we rename.
  *
- * Returns { success, outputPath, reason? }.  When `success` is false, `reason`
- * carries the validator message for logging.
+ * Returns { success, outputPath, reason?, code?, expected?, found? }.  When
+ * `success` is false, `reason` carries the validator message for logging and
+ * `code` / `expected` / `found` the validator's structured result.
  */
 async function packAndValidate(files, outputPath, expectedImageCount, signal) {
   const tmpPath = await packToCbz(files, outputPath, signal);
   const validation = await validateCbz(tmpPath, expectedImageCount);
   if (!validation.valid) {
     try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-    return { success: false, outputPath, reason: validation.reason };
+    return { success: false, outputPath, reason: validation.reason,
+      code: validation.code, expected: validation.expected, found: validation.found };
   }
   await fs.promises.rename(tmpPath, outputPath);
   return { success: true, outputPath };
@@ -961,7 +981,12 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
           log(msg, 'info', true);
         };
 
-        await extractPdf(srcFile, tmpDir, totalPages, signal, onPageProgress, log);
+        try {
+          await extractPdf(srcFile, tmpDir, totalPages, signal, onPageProgress, log);
+        } catch (err) {
+          if (err.name === 'AbortError' || signal?.aborted) throw err;
+          throw withCause(err, 'magick-error');
+        }
 
         const finalCount = fs.readdirSync(tmpDir)
           .filter((f) => /\.(jpg|jpeg|png)$/i.test(f)).length;
@@ -1001,30 +1026,40 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       const wrapperOutDir = path.join(outDir, baseName);
       fs.mkdirSync(wrapperOutDir, { recursive: true });
       log(`  Hierarchical structure — processing into ${baseName}/`, 'info');
-      const tree      = { claims, pagesDone: 0, failures: [] };
+      const tree      = { claims, pagesDone: 0, failures: [], skipped: 0 };
       const treePages = deepImages(contentDir).length;
       const outputs   = await processDirectoryTree(contentDir, wrapperOutDir, isManga, log, signal, waitIfPaused, tree);
-      if (outputs.length === 0) {
-        log('  WARNING: No output produced from hierarchical archive', 'warn');
-        return { success: false, outcome: 'noImages', isPdf, pdfPages };
-      }
       // The archive only validates when nothing inside it was lost:
       //   • every nested archive converted and validated — a nested failure
       //     used to be ignored, so the bundle still validated and was offered
       //     for deletion while it held the only copy of those pages;
       //   • every page of the tree is in a CBZ validated this run — a page
       //     whose pack failed or was skipped used to vanish unnoticed.
-      let reason = null;
+      let reason = null, failure = null;
       if (tree.failures.length > 0) {
         const more = tree.failures.length > 1 ? ` (+${tree.failures.length - 1} more)` : '';
         reason = `Nested archive not validated: ${tree.failures[0]}${more}`;
+        failure = { cause: 'nested-failed', nested: tree.failures[0], more: tree.failures.length - 1 };
       } else if (tree.pagesDone !== treePages) {
         const lost = treePages - tree.pagesDone;
         reason = `${lost} of ${treePages} ${lost === 1 ? 'page' : 'pages'} not in a validated CBZ`;
+        failure = { cause: 'pages-lost', lost, total: treePages };
       }
       if (reason) {
         log(`  ERROR: ${reason}`, 'error');
-        return { success: false, outcome: 'validationFailed', reason, isPdf, pdfPages };
+        return { success: false, outcome: 'validationFailed', reason, failure, isPdf, pdfPages };
+      }
+      // Nothing failed and nothing new was written.  These checks come after
+      // the failure checks: a bundle whose nested archive failed used to be
+      // reported as "no images" when it produced no new output.
+      if (outputs.length === 0) {
+        // Every output already existed and validated this run (a re-run):
+        // "skipped (CBZ already exists)", not a failure.
+        if (tree.skipped > 0) {
+          return { success: false, outcome: 'allSkipped', outputs: [], folderName: baseName, isPdf, pdfPages };
+        }
+        log('  WARNING: No output produced from hierarchical archive', 'warn');
+        return { success: false, outcome: 'noImages', failure: { cause: 'no-images' }, isPdf, pdfPages };
       }
       // validated:true — every page and every nested archive went through a
       // validation this run, so an explicit flag lets callers (e.g. the
@@ -1039,7 +1074,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
 
     if (groups.length === 0) {
       log('  WARNING: No images found inside archive', 'warn');
-      return { success: false, outcome: 'noImages', isPdf, pdfPages };
+      return { success: false, outcome: 'noImages', failure: { cause: 'no-images' }, isPdf, pdfPages };
     }
 
     // Multi-output → place CBZs inside a named subfolder to keep root clean.
@@ -1085,7 +1120,8 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
         if (existing.state === 'mismatch') {
           const reason = `Existing ${outputName}.cbz failed validation — ${existing.reason}`;
           log(`  ERROR: ${reason}`, 'error');
-          return { success: false, outcome: 'validationFailed', reason, isPdf, pdfPages };
+          return { success: false, outcome: 'validationFailed', reason, isPdf, pdfPages,
+            failure: { cause: 'existing-mismatch', name: `${outputName}.cbz`, inner: existing.reason } };
         }
         log(`  WARN: Existing ${outputName}.cbz is unreadable — re-converting…`, 'warn');
         try { fs.unlinkSync(outputPath); } catch { /* ignore */ }
@@ -1100,7 +1136,8 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       const pv = await packAndValidate(group.files, outputPath, imageCount, signal);
       if (!pv.success) {
         log(`  ERROR: Validation failed — ${pv.reason}`, 'error');
-        return { success: false, outcome: 'validationFailed', reason: pv.reason, isPdf, pdfPages };
+        return { success: false, outcome: 'validationFailed', reason: pv.reason, isPdf, pdfPages,
+          failure: { cause: `cbz-${pv.code || 'invalid'}`, name: `${outputName}.cbz`, expected: pv.expected, found: pv.found, detail: pv.reason } };
       }
       log(`  ✓ Valid: ${outputName}.cbz`, 'success');
       outputs.push(outputPath);
@@ -1264,6 +1301,76 @@ function logSummary(outcomes, rootFolder, log) {
   }
 }
 
+// ─── End-of-run failure block (Judy's spec, ruling 15) ─────────────────────────
+
+/** First non-empty line of a child process's stderr, else the error message. */
+function firstErrorLine(err) {
+  const line = String(err?.stderr || '').split(/\r?\n/).map((l) => l.trim()).find(Boolean);
+  return line || String(err?.message || err || '').split(/\r?\n/)[0];
+}
+
+/**
+ * Message + Fix for one file that failed to convert: `o` is an outcome
+ * ({ file, result } or { file, err }).  Causes come from structured fields
+ * (withCause on thrown errors, result.failure on validation failures), never
+ * from re-parsing message strings.
+ */
+function describeConvertFailure(o) {
+  const pages = (n) => `${n} ${n === 1 ? 'page' : 'pages'}`;
+  if (o.err || o.error) {
+    const err = o.err || { message: o.error };
+    switch (err.convertCause) {
+      case '7zip-missing':   return { message: "7-Zip is missing from this install — it can't extract this file.",
+        fix: 'Reinstall the app, then convert again.' };
+      case 'magick-missing': return { message: "ImageMagick isn't installed — it's needed to convert PDF pages.",
+        fix: 'Install ImageMagick 7 from imagemagick.org, then convert this file again.' };
+      case 'unsafe-path':    return { message: `"${path.basename(o.file)}" has a page name that points outside its own folder — treated as unsafe, not converted.`,
+        fix: 'Get a clean copy of this file, then convert it again.' };
+      case 'magick-error':   return { message: firstErrorLine(err),
+        fix: "Convert it again — if it keeps failing, check that the PDF isn't password-protected or corrupt." };
+      default:               return { message: firstErrorLine(err),
+        fix: 'Convert it again — if it keeps failing, the file itself may be corrupt.' };
+    }
+  }
+  const f = o.result?.failure || { cause: o.result?.outcome === 'noImages' ? 'no-images' : 'unknown' };
+  switch (f.cause) {
+    case 'no-images':          return { message: 'No pages were found inside this file.',
+      fix: 'Open it and check it actually holds image pages.' };
+    case 'cbz-7zip-missing':   return { message: "7-Zip is missing from this install — it can't extract this file.",
+      fix: 'Reinstall the app, then convert again.' };
+    case 'cbz-integrity':      return { message: `"${f.name}" failed an integrity check.`, fix: 'Convert it again.' };
+    case 'cbz-unlistable':     return { message: `Couldn't read back "${f.name}" to check it.`,
+      fix: 'Convert it again — if it keeps failing, close anything that has the file open.' };
+    case 'cbz-no-images':      return { message: `"${f.name}" was created with no pages in it.`, fix: 'Convert it again.' };
+    case 'cbz-count-mismatch': return { message: `"${f.name}" should hold ${pages(f.expected)} but has ${f.found}.`, fix: 'Convert it again.' };
+    case 'existing-mismatch':  return { message: `An existing "${f.name}" doesn't match this file — ${f.inner}.`,
+      fix: `Move or delete the existing "${f.name}" yourself, then convert this file again.` };
+    case 'nested-failed':      return { message: `"${f.nested}" inside this file didn't convert or validate.${f.more > 0 ? ` (+${f.more} more)` : ''}`,
+      fix: `Convert this file again — if it keeps failing, convert "${f.nested}" on its own to see the detailed error.` };
+    case 'pages-lost':         return { message: `${f.lost} of ${f.total} ${f.lost === 1 ? "page isn't" : "pages aren't"} in a validated CBZ.`,
+      fix: 'Convert this file again.' };
+    default:                   return { message: o.result?.reason || f.detail || 'Conversion failed.',
+      fix: 'Convert it again — if it keeps failing, the file itself may be corrupt.' };
+  }
+}
+
+/**
+ * The block itself (the same shape as folder-pack's): a header, then per file
+ * `  "<rel>" — <message>` (Open Folder shows the file in Explorer) and
+ * `    Fix: <fix>`.
+ */
+function logConvertFailureSummary(failed, rootFolder, log) {
+  if (failed.length === 0) return;
+  const n = failed.length;
+  log(`${n} ${n === 1 ? 'file' : 'files'} failed to convert:`, 'header');
+  for (const o of failed) {
+    const { message, fix } = describeConvertFailure(o);
+    log(`  "${path.relative(rootFolder, o.file)}" — ${message}`, 'error', false,
+      { path: o.file, title: 'Show this file in Explorer', mode: 'file' });
+    log(`    Fix: ${fix}`, 'info');
+  }
+}
+
 // ─── Main entry point ────────────────────────────────────────────────────────
 
 async function startConversion(options, log, progress, signal, waitIfPaused) {
@@ -1313,7 +1420,7 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
     } catch (err) {
       if (err.name === 'AbortError') break;
       log(`  ERROR: ${err.message}`, 'error');
-      outcomes.push({ file, error: err.message });
+      outcomes.push({ file, error: err.message, err });
     }
 
     fileDurations.push(Date.now() - fileStart);
@@ -1323,38 +1430,54 @@ async function startConversion(options, log, progress, signal, waitIfPaused) {
   }
 
   progress(files.length, files.length, 0);
-  const summary = signal?.aborted
-    ? `\nStopped. ${converted.length} file(s) converted before cancel.`
-    : `\nDone. ${converted.length} of ${files.length} file(s) converted successfully.`;
-  log(summary, converted.length > 0 ? 'success' : 'info');
 
+  // Judy's order (ruling 15): the per-file summary, then the failure block,
+  // then the completion line.  A cancelled run shows neither block.
+  const failed = outcomes.filter((o) => o.error || o.result?.outcome === 'validationFailed' || o.result?.outcome === 'noImages');
   if (!signal?.aborted) {
     logSummary(outcomes, rootFolder, log);
+    logConvertFailureSummary(failed, rootFolder, log);
   }
+  let summary;
+  if (signal?.aborted) {
+    summary = `\nStopped. ${converted.length} file(s) converted before cancel.`;
+  } else if (failed.length > 0) {
+    const n = files.length;
+    summary = `\nDone. ${converted.length} of ${n} ${n === 1 ? 'file' : 'files'} converted, ${failed.length} failed (see failures above).`;
+  } else {
+    summary = `\nDone. ${converted.length} of ${files.length} file(s) converted successfully.`;
+  }
+  log(summary, !signal?.aborted && failed.length > 0 ? 'warn' : converted.length > 0 ? 'success' : 'info');
 
   // Post-scan: find pre-existing orphaned originals (from previous runs)
-  const { simple: preExisting, needsReview } = await findOrphanedOriginals(rootFolder);
+  const { simple: preExisting, needsReview: needsReviewAll } = await findOrphanedOriginals(rootFolder);
 
-  // Remove files already in 'converted' from preExisting (avoid duplicates).
-  // Also drop every archive that failed validation in THIS run: the orphan
-  // scan only checks that a same-name .cbz opens, and that .cbz may be the
-  // very output that just failed (e.g. a short Solo.cbz beside Solo.cbr),
-  // so offering the original for deletion would lose the pages missing from it.
-  const convertedSet  = new Set(converted);
-  const failedSet     = new Set(outcomes
-    .filter((o) => o.result?.outcome === 'validationFailed')
+  // The orphan scan only checks that a same-name .cbz OPENS.  That is not
+  // proof the original is safe to delete: the .cbz may be short, or be an
+  // output that just failed validation (a short Solo.cbz beside Solo.cbr).
+  //   • Pre-existing: offer only originals whose outputs all validated in
+  //     THIS run and were skipped as already done (outcome 'allSkipped').
+  //     Originals converted this run are already in `converted`; ones that
+  //     failed (validation, no images, an error) or were never reached
+  //     (Cancel) are not offered.
+  //   • Needs review: drop every original that failed in this run.  The
+  //     review dialog offers Delete, and did not say the file had just failed.
+  const skippedValid = new Set(outcomes.filter((o) => o.result?.outcome === 'allSkipped').map((o) => o.file));
+  const failedSet    = new Set(outcomes
+    .filter((o) => o.error || (!o.result?.success && o.result?.outcome !== 'allSkipped'))
     .map((o) => o.file));
-  const uniquePreExisting = preExisting.filter((f) => !convertedSet.has(f) && !failedSet.has(f));
+  const uniquePreExisting = preExisting.filter((f) => skippedValid.has(f));
+  const reviewable        = needsReviewAll.filter((item) => !failedSet.has(item.file));
 
   if (uniquePreExisting.length > 0) {
     log(`\nFound ${uniquePreExisting.length} pre-existing original(s) with a matching .cbz already present.`, 'warn');
   }
-  if (needsReview.length > 0) {
-    log(`Found ${needsReview.length} file(s) that may be collection/split-archive leftovers — review manually.`, 'warn');
-    for (const item of needsReview) log(`  ? ${path.relative(rootFolder, item.file)}`, 'skip');
+  if (reviewable.length > 0) {
+    log(`Found ${reviewable.length} file(s) that may be collection/split-archive leftovers — review manually.`, 'warn');
+    for (const item of reviewable) log(`  ? ${path.relative(rootFolder, item.file)}`, 'skip');
   }
 
-  return { converted, preExisting: uniquePreExisting, needsReview, totalCbzBytes };
+  return { converted, preExisting: uniquePreExisting, needsReview: reviewable, totalCbzBytes };
 }
 
 async function convertSingleFile(filePath, isManga, log, signal, waitIfPaused = null) {

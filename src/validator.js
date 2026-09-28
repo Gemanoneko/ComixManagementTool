@@ -2,6 +2,7 @@ const path = require('path');
 const { execFilePromise } = require('./exec');
 const { sevenZipArgs } = require('./seven-zip');
 const { getSevenZip } = require('./tools');
+const { sizePair } = require('./format');
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif']);
 
@@ -100,7 +101,9 @@ async function listEntries(archivePath, signal) {
  * `reason` names the first difference found ("(+N more)" when there are
  * several of that kind); `problems` lists every difference, one record per
  * entry, for callers that report them all (folder-pack).  An entry whose size
- * AND CRC differ is reported once, as a size difference.  `sourceEntries`
+ * AND CRC differ is reported once, as a size difference; a size difference's
+ * reason carries both sizes ("X" is 1.2 KB in the original but 1.1 KB in
+ * the resized copy.).  `sourceEntries`
  * may carry `crc: null` (a folder on disk has no stored CRC) — then only the
  * size is compared.  `noun` names the copy in the messages.
  *
@@ -167,8 +170,15 @@ function compareEntries(sourceEntries, outputEntries, changedPaths, noun = 'resi
 
   if (missing.length)        return describe(`Missing from ${noun}`, missing);
   if (differ.length) {
-    const label = differ[0].cause === 'size' ? `Size differs in ${noun}` : `Content differs in ${noun}`;
-    return describe(label, differ.map((d) => d.path));
+    const d = differ[0];
+    if (d.cause === 'size') {
+      // Sergei's ruling 19: carry the actual sizes (exact bytes when the
+      // formatted sizes would read the same).
+      const [a, b] = sizePair(d.sourceSize, d.outputSize);
+      const more = differ.length > 1 ? ` (+${differ.length - 1} more)` : '';
+      return { valid: false, reason: `"${d.path}" is ${a} in the original but ${b} in the ${noun}.${more}`, problems };
+    }
+    return describe(`Content differs in ${noun}`, differ.map((x) => x.path));
   }
   if (extra.length)          return describe(`Unexpected in ${noun}`, extra);
   if (missingFolders.length) return describe(`Folder missing from ${noun}`, missingFolders);
@@ -192,7 +202,12 @@ function compareEntries(sourceEntries, outputEntries, changedPaths, noun = 'resi
  * @param {string} cbzPath
  * @param {number} expectedCount  Number of image files that should be inside
  * @param {AbortSignal} [signal]  Optional — kill the child process on abort
- * @returns {Promise<{ valid: boolean, reason?: string }>}
+ * `code` names the failed check for callers that word it themselves (the
+ * Convert end-of-run summary): '7zip-missing' | 'integrity' | 'unlistable' |
+ * 'no-images' | 'count-mismatch' (with `expected` / `found`).  `reason` is
+ * unchanged.
+ *
+ * @returns {Promise<{ valid: boolean, reason?: string, code?: string, expected?: number, found?: number }>}
  */
 async function validateCbz(cbzPath, expectedCount, signal) {
   // 1. Integrity test: 7-Zip computes CRC for every entry and compares to stored value.
@@ -205,12 +220,13 @@ async function validateCbz(cbzPath, expectedCount, signal) {
     imageCount = await countImageEntries(cbzPath, signal);
   } catch (err) {
     if (err.name === 'AbortError') throw err;
-    return { valid: false, reason: 'Cannot list archive contents' };
+    return { valid: false, reason: 'Cannot list archive contents', code: 'unlistable' };
   }
 
-  if (imageCount === 0) return { valid: false, reason: 'CBZ contains no image files' };
+  if (imageCount === 0) return { valid: false, reason: 'CBZ contains no image files', code: 'no-images' };
   if (imageCount !== expectedCount) {
-    return { valid: false, reason: `Image count mismatch: expected ${expectedCount}, found ${imageCount}` };
+    return { valid: false, reason: `Image count mismatch: expected ${expectedCount}, found ${imageCount}`,
+             code: 'count-mismatch', expected: expectedCount, found: imageCount };
   }
 
   return { valid: true };
@@ -228,12 +244,12 @@ async function validateCbz(cbzPath, expectedCount, signal) {
  */
 async function testIntegrity(cbzPath, signal) {
   const sevenZip = getSevenZip();
-  if (!sevenZip) return { valid: false, reason: '7-Zip not found — cannot validate CBZ' };
+  if (!sevenZip) return { valid: false, reason: '7-Zip not found — cannot validate CBZ', code: '7zip-missing' };
   try {
     await execFilePromise(sevenZip, sevenZipArgs('t', [], cbzPath), signal, { maxBuffer: 64 * 1024 * 1024 });
   } catch (err) {
     if (err.name === 'AbortError') throw err;
-    return { valid: false, reason: 'Archive integrity test failed (corrupt ZIP or CRC error)' };
+    return { valid: false, reason: 'Archive integrity test failed (corrupt ZIP or CRC error)', code: 'integrity' };
   }
   return { valid: true };
 }

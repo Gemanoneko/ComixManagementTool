@@ -1,7 +1,10 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
+const { tempRoot, setTempRoot, tempRootFor } = require('./src/temp');
+
+// This install's own temp folder, keyed by its userData folder (see src/temp.js).
+setTempRoot(tempRootFor(app.getPath('userData')));
 
 /**
  * Delete leftover temp files from previous crashed sessions.
@@ -20,9 +23,15 @@ const os = require('os');
  * writes into the original in place, so a resized temp copy is never the only
  * surviving copy of a comic — the original stays intact until a complete,
  * flushed replacement is renamed over it.
+ *
+ * Only this install's own temp folder is swept (src/temp.js — one per
+ * userData folder), never %TEMP% itself: a dev copy and the installed app
+ * can run side by side, and each used to delete the other's in-flight files.
+ * `cbz_*` leftovers that older versions left directly in %TEMP% are no
+ * longer touched — a running older version may still be using them.
  */
 function cleanupOrphanedTempDirs() {
-  const tmpBase = os.tmpdir();
+  const tmpBase = tempRoot();
   try {
     for (const entry of fs.readdirSync(tmpBase, { withFileTypes: true })) {
       if (!entry.name.startsWith('cbz_')) continue;
@@ -143,6 +152,13 @@ app.on('before-quit', () => {
 // App version
 ipcMain.handle('app:version', () => app.getVersion());
 
+// Log-line Open Folder button fields ({ path, openTitle, openMode }) for the
+// renderer's appendLog, from a sendLog `open` argument { path, title, mode }.
+function openFields(open) {
+  if (!open || !open.path) return {};
+  return { path: open.path, openTitle: open.title || null, openMode: open.mode === 'file' ? 'file' : 'folder' };
+}
+
 // ── Persistent settings (JSON file in userData) ──────────────────────────────
 const settingsPath = path.join(app.getPath('userData'), 'settings.json');
 
@@ -177,10 +193,12 @@ ipcMain.handle('dialog:openFolder', async () => {
 ipcMain.handle('conversion:start', async (event, options) => {
   activeAbortController = new AbortController();
 
-  const sendLog = (msg, type = 'info', update = false) => {
+  // open (optional): { path, title, mode } — an Open Folder button on the
+  // line (the end-of-run failure block); mode 'file' shows the file itself.
+  const sendLog = (msg, type = 'info', update = false, open = null) => {
     if (!mainWindow.isDestroyed()) {
       // update=true → renderer replaces the last log line in place
-      mainWindow.webContents.send(update ? 'conversion:logUpdate' : 'conversion:log', { msg, type });
+      mainWindow.webContents.send(update ? 'conversion:logUpdate' : 'conversion:log', { msg, type, ...openFields(open) });
     }
   };
 
@@ -375,9 +393,10 @@ function clearResizePause() {
 ipcMain.handle('resize:start', async (event, { folder }) => {
   resizeAbortController = new AbortController();
 
-  const sendLog = (msg, type = 'info') => {
+  // open (optional): as for conversion:start's sendLog
+  const sendLog = (msg, type = 'info', open = null) => {
     if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('resize:log', { msg, type });
+      mainWindow.webContents.send('resize:log', { msg, type, ...openFields(open) });
     }
   };
 
@@ -462,9 +481,9 @@ ipcMain.handle('resize:discard', async (event, items) => {
 
 // Convert a single file (used by the needs-review modal)
 ipcMain.handle('conversion:convertSingle', async (event, { filePath, isManga }) => {
-  const sendLog = (msg, type = 'info', update = false) => {
+  const sendLog = (msg, type = 'info', update = false, open = null) => {
     if (!mainWindow.isDestroyed()) {
-      mainWindow.webContents.send(update ? 'conversion:logUpdate' : 'conversion:log', { msg, type });
+      mainWindow.webContents.send(update ? 'conversion:logUpdate' : 'conversion:log', { msg, type, ...openFields(open) });
     }
   };
   try {
@@ -804,8 +823,10 @@ ipcMain.handle('folderpack:convert', async (event, { folder, selectedFolderPaths
   try {
     const { applyConvertFolders } = require('./src/folder-packer');
     const result = await applyConvertFolders(folder, groups, sendLog, sendProgress, signal);
+    // aborted: Cancel stopped the run part-way (the renderer then says
+    // "Cancelled — …" instead of "Done: …").
     if (!mainWindow.isDestroyed())
-      mainWindow.webContents.send('folderpack:convertComplete', { ...result, aborted: false });
+      mainWindow.webContents.send('folderpack:convertComplete', { ...result, aborted: !!result.aborted });
   } catch (err) {
     if (err.name !== 'AbortError') sendLog(`Error: ${err.message}`, 'error');
     if (!mainWindow.isDestroyed())
@@ -833,6 +854,24 @@ ipcMain.handle('folderpack:rename', (event, { folder, selectedFolderPaths }) => 
     mainWindow.webContents.send('folderpack:renameComplete', { ...result });
 
   return result;
+});
+
+// ── Folder-pack fix flow: rename a bad file/folder name on disk ──────────────
+// Everything is re-checked here (src/folder-packer.js checkRenameRequest):
+// the folder must come from the last Scan Ext-Folders, the path must stay
+// inside it and exist, and its name must need fixing.  Nothing is renamed
+// while a pack or retry is running.
+const scannedPackFolders = () => (folderPackScanResult?.convertGroups || []).map((g) => g.folderPath);
+
+ipcMain.handle('folderpack:previewRenames', (event, items) => {
+  const { previewRenames } = require('./src/folder-packer');
+  return previewRenames(scannedPackFolders(), items);
+});
+
+ipcMain.handle('folderpack:renameEntry', (event, req) => {
+  if (folderPackAbortController) return { success: false, error: 'A pack is running — try again when it finishes.' };
+  const { renameEntry } = require('./src/folder-packer');
+  return renameEntry(scannedPackFolders(), req);
 });
 
 ipcMain.handle('folderpack:cancel', () => {

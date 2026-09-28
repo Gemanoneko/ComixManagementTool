@@ -45,6 +45,13 @@ let bundleExtracted = [];  // { cbzPath, cbzRel, targetFolder, targetFolderRel }
 let extConvertGroups  = [];  // Category A groups from last ext-folder scan
 let extRenameGroups   = [];  // Category B groups from last ext-folder scan
 let extConverted      = [];  // { folderPath, folderRel, outputPaths } after convert
+// Folder-pack fix flow (Names / Retry panels) — see renderPackFix()
+const packFailures    = new Map();  // folderPath → latest failure entry from folderpack:convertComplete
+const packFixModes    = new Map();  // row key → 'remove' | 'replace'
+const packFixErrors   = new Map();  // row key → inline rename error
+let   packFixPreviews = new Map();  // row key → preview from folderpack:previewRenames
+let   packFixBusy     = false;      // a rename (or Fix All) is running
+const packFixRowEls   = new Map();  // row key → its Names-panel row element
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 // Tabs
@@ -119,6 +126,19 @@ const extDeletionPanel       = document.getElementById('extDeletionPanel');
 const extDeletionSummary     = document.getElementById('extDeletionSummary');
 const extDeletionList        = document.getElementById('extDeletionList');
 const deleteAllExtFoldersBtn = document.getElementById('deleteAllExtFoldersBtn');
+const packFixNamesPanel      = document.getElementById('packFixNamesPanel');
+const packFixNamesSummary    = document.getElementById('packFixNamesSummary');
+const packFixNamesList       = document.getElementById('packFixNamesList');
+const packFixAllBtn          = document.getElementById('packFixAllBtn');
+const packFixRetryPanel      = document.getElementById('packFixRetryPanel');
+const packFixRetrySummary    = document.getElementById('packFixRetrySummary');
+const packFixRetryList       = document.getElementById('packFixRetryList');
+const packRetryAllBtn        = document.getElementById('packRetryAllBtn');
+const packFixModal           = document.getElementById('packFixModal');
+const packFixModalTitle      = document.getElementById('packFixModalTitle');
+const packFixModalList       = document.getElementById('packFixModalList');
+const packFixCancelBtn       = document.getElementById('packFixCancelBtn');
+const packFixConfirmBtn      = document.getElementById('packFixConfirmBtn');
 
 // Bundle unwrap
 const bundlePreviewPanel    = document.getElementById('bundlePreviewPanel');
@@ -396,8 +416,8 @@ function resetConvertControls() {
 }
 
 // ── IPC: Conversion ───────────────────────────────────────────────────────────
-electron.on('conversion:log', ({ msg, type }) => {
-  appendLog(msg, type);
+electron.on('conversion:log', ({ msg, type, path: p, openTitle, openMode }) => {
+  appendLog(msg, type, p || null, openTitle || null, openMode || 'folder');
 });
 
 electron.on('conversion:logUpdate', ({ msg, type }) => {
@@ -438,7 +458,10 @@ electron.on('conversion:complete', (result) => {
 });
 
 // ── Log helpers ───────────────────────────────────────────────────────────────
-function appendLog(msg, type = 'info', folderPath = null, openTitle = null) {
+// folderPath: adds an Open Folder button.  openMode 'folder' (default) opens
+// that folder (shell:openPath); 'file' shows the file itself highlighted in
+// Explorer (shell:openFolder) — the Convert / Resize failure blocks.
+function appendLog(msg, type = 'info', folderPath = null, openTitle = null, openMode = 'folder') {
   const placeholder = logContainer.querySelector('.log-placeholder');
   if (placeholder) placeholder.remove();
 
@@ -456,7 +479,8 @@ function appendLog(msg, type = 'info', folderPath = null, openTitle = null) {
     btn.className   = 'log-open-btn';
     btn.textContent = 'Open Folder';
     if (openTitle) btn.title = openTitle;
-    btn.addEventListener('click', () => electron.invoke('shell:openPath', folderPath));
+    const channel = openMode === 'file' ? 'shell:openFolder' : 'shell:openPath';
+    btn.addEventListener('click', () => electron.invoke(channel, folderPath));
     span.appendChild(btn);
     span.appendChild(document.createTextNode('\n'));
   } else {
@@ -634,8 +658,8 @@ cancelResizeBtn.addEventListener('click', () => {
   electron.invoke('resize:cancel');
 });
 
-electron.on('resize:log', ({ msg, type }) => {
-  appendLog(msg, type);
+electron.on('resize:log', ({ msg, type, path: p, openTitle, openMode }) => {
+  appendLog(msg, type, p || null, openTitle || null, openMode || 'folder');
 });
 
 electron.on('resize:progress', ({ current, total }) => {
@@ -677,7 +701,8 @@ electron.on('resize:complete', (result) => {
     if (resizeElapsed) appendLog(`Scan complete — elapsed: ${resizeElapsed}`, 'info');
     showResizeModal(pendingResized, errors);
   } else {
-    const msg = `Done — ${skipped} file(s) already within 4 500 px, ${errors.length} error(s).` +
+    const msg = `Done — ${skipped} ${skipped === 1 ? 'file' : 'files'} already within 4 500 px` +
+                (errors.length > 0 ? `, ${errors.length} failed (see failures above)` : '') + '.' +
                 (resizeElapsed ? `  Elapsed: ${resizeElapsed}.` : '');
     appendLog(msg, errors.length > 0 ? 'warn' : 'success');
   }
@@ -1781,6 +1806,7 @@ function setBundleBusy(busy) {
   applyExtConvertBtn.disabled = busy;
   applyExtRenameBtn.disabled  = busy;
   setTabsDisabled(busy);
+  updatePackFixControls();
   if (busy) {
     fixProgressWrap.classList.add('hidden');
     fixProgressFill.style.width   = '0%';
@@ -2083,25 +2109,36 @@ electron.on('folderpack:convertComplete', (result) => {
   setBundleBusy(false);
   fixProgressWrap.classList.add('hidden');
 
+  const converted = result.converted || 0;
+  const failed    = result.failed    || 0;
   if (result.aborted) {
-    appendLog('Conversion cancelled.', 'warn');
-    return;
+    appendLog(
+      `Cancelled — ${converted} ${converted === 1 ? 'folder' : 'folders'} converted before cancel` +
+      (failed > 0 ? `, ${failed} failed (see failures above)` : '') + '.',
+      'warn'
+    );
+  } else {
+    appendLog(
+      `Done: ${converted} ${converted === 1 ? 'folder' : 'folders'} converted` +
+      (failed > 0 ? `, ${failed} failed (see failures above)` : '') + '.',
+      failed > 0 ? 'warn' : 'success'
+    );
   }
-
-  appendLog(
-    `Done: ${result.converted} ${result.converted === 1 ? 'folder' : 'folders'} converted` +
-    (result.failed > 0 ? `, ${result.failed} failed (see failures above)` : '') + '.',
-    result.failed > 0 ? 'warn' : 'success'
-  );
 
   extConvertPanel.classList.add('hidden');
   extConvertGroups = [];
 
-  if (result.convertedItems && result.convertedItems.length > 0) {
-    extConverted = result.convertedItems;
+  // This run may be a Retry / auto-repack: add to what earlier runs produced.
+  for (const item of result.convertedItems || []) {
+    extConverted = extConverted.filter((e) => e.folderPath !== item.folderPath).concat([item]);
+    packFailures.delete(item.folderPath);
+  }
+  if (extConverted.length > 0) {
     renderExtDeletion(extConverted);
     extDeletionPanel.classList.remove('hidden');
   }
+  for (const fl of result.failures || []) packFailures.set(fl.folderPath, fl);
+  renderPackFix();
 });
 
 electron.on('folderpack:renameComplete', (result) => {
@@ -2125,6 +2162,7 @@ scanExtFoldersBtn.addEventListener('click', async () => {
   extConvertPanel.classList.add('hidden');
   extRenamePanel.classList.add('hidden');
   extDeletionPanel.classList.add('hidden');
+  clearPackFix();
   logContainer.innerHTML = '';
 
   setBundleBusy(true);
@@ -2385,4 +2423,290 @@ deleteAllExtFoldersBtn.addEventListener('click', async () => {
 
   if (extConverted.length === 0) extDeletionPanel.classList.add('hidden');
   else deleteAllExtFoldersBtn.disabled = false;
+});
+
+// ── Folder-pack fix flow (Sergei's rulings 7–11, Judy's spec) ─────────────────
+// Two panels fed by result.failures of folderpack:convertComplete:
+//   Names — one row per bad name (trailing space / period, invalid character,
+//           reserved name); Fix renames the real file or folder on disk.
+//   Retry — one row per folder whose problem is not a name; Retry packs it again.
+// New names and conflicts come from the main process (folderpack:previewRenames),
+// and folderpack:renameEntry re-checks everything when it renames.
+
+const PACK_FIX_TOOLTIPS = {
+  'name-trailing-space': ['Delete the trailing space.', 'Replace the trailing space with an underscore.'],
+  'name-trailing-dot':   ['Delete the trailing period.', 'Replace the trailing period with an underscore.'],
+  'name-invalid-char':   ["Delete the character Windows can't store.", "Replace the character Windows can't store with an underscore."],
+};
+
+const packRowKey = (folderPath, relPath) => `${folderPath}\u0000${relPath}`;
+const relDirOf   = (relPath) => (relPath.includes('\\') ? relPath.slice(0, relPath.lastIndexOf('\\')) : '');
+const joinWin    = (a, b) => (b ? `${a}\\${b}` : a);
+
+/** Name rows, in panel order: [{ key, folderPath, folderRel, relPath, cause, char, isDir }] */
+function packNameRows() {
+  const rows = [];
+  for (const fl of packFailures.values()) {
+    if (fl.fixGroup !== 'names') continue;
+    for (const r of fl.records) {
+      rows.push({ key: packRowKey(fl.folderPath, r.file), folderPath: fl.folderPath, folderRel: fl.folder,
+        relPath: r.file, cause: r.cause, char: r.char, isDir: !!r.isDir });
+    }
+  }
+  return rows;
+}
+
+function clearPackFix() {
+  packFailures.clear();
+  packFixModes.clear();
+  packFixErrors.clear();
+  packFixPreviews = new Map();
+  packFixNamesPanel.classList.add('hidden');
+  packFixRetryPanel.classList.add('hidden');
+  packFixNamesList.innerHTML = '';
+  packFixRetryList.innerHTML = '';
+  packFixRowEls.clear();
+}
+
+function updatePackFixControls() {
+  const busy = isFixing || packFixBusy;
+  packFixNamesList.querySelectorAll('.pack-fix-mode button').forEach((b) => { b.disabled = busy; });
+  for (const [key, el] of packFixRowEls) {
+    const pv = packFixPreviews.get(key);
+    el.querySelector('.btn-fix-apply').disabled = busy || !pv || !pv.ok;
+  }
+  packFixRetryList.querySelectorAll('.btn-fix-apply').forEach((b) => { b.disabled = busy; });
+  packFixAllBtn.disabled   = busy || packNameRows().length === 0;
+  packRetryAllBtn.disabled = busy || packFixRetryList.children.length === 0;
+}
+
+function renderPackFix() {
+  // ── Names panel ──
+  packFixNamesList.innerHTML = '';
+  packFixRowEls.clear();
+  const rows = packNameRows();
+  let lastFolder = null;
+  for (const row of rows) {
+    if (row.folderPath !== lastFolder) {
+      lastFolder = row.folderPath;
+      const hdr = document.createElement('div');
+      hdr.className   = 'pack-fix-folder';
+      hdr.textContent = row.folderRel + '\\';
+      packFixNamesList.appendChild(hdr);
+    }
+    const mode = packFixModes.get(row.key) || 'remove';
+
+    const el = document.createElement('div');
+    el.className = 'fix-group-row pack-fix-row';
+    packFixRowEls.set(row.key, el);
+
+    const info = document.createElement('div');
+    info.className = 'fix-group-info';
+    const from = document.createElement('span');
+    from.className   = 'fix-group-from pack-fix-name';
+    from.textContent = `"${row.relPath}${row.isDir ? '\\' : ''}"`;
+    const to = document.createElement('span');
+    to.className = 'fix-group-to pack-fix-name';
+    const badge = document.createElement('span');
+    badge.className   = 'fix-conflict-badge hidden';
+    badge.textContent = ' ⚠ target exists — will use alternate name';
+    const err = document.createElement('span');
+    err.className = 'pack-fix-error';
+    err.textContent = packFixErrors.get(row.key) || '';
+    err.classList.toggle('hidden', !packFixErrors.get(row.key));
+    info.append(from, document.createTextNode(' → '), to, badge, err);
+
+    const actions = document.createElement('div');
+    actions.className = 'fix-group-actions';
+    const tips = PACK_FIX_TOOLTIPS[row.cause];
+    if (tips) {                                   // no toggle for a reserved name: one fix only
+      const group = document.createElement('div');
+      group.className = 'pack-fix-mode';
+      group.setAttribute('role', 'group');
+      [['remove', 'Remove', tips[0]], ['replace', 'Replace with _', tips[1]]].forEach(([value, label, tip]) => {
+        const b = document.createElement('button');
+        b.type        = 'button';
+        b.textContent = label;
+        b.title       = tip;
+        b.setAttribute('aria-pressed', String(mode === value));
+        b.addEventListener('click', () => {
+          packFixModes.set(row.key, value);
+          group.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+          refreshPackFixPreviews();
+        });
+        group.appendChild(b);
+      });
+      actions.appendChild(group);
+    }
+    const open = document.createElement('button');
+    open.className   = 'fix-row-open';
+    open.textContent = 'Open Folder';
+    open.title       = 'Open this folder in Explorer.';
+    open.addEventListener('click', () => electron.invoke('shell:openPath', joinWin(row.folderPath, relDirOf(row.relPath))));
+    const fix = document.createElement('button');
+    fix.className   = 'btn btn-fix-apply';
+    fix.textContent = 'Fix';
+    fix.disabled    = true;                        // enabled once its preview arrives
+    fix.addEventListener('click', () => fixPackRows([row]));
+    actions.append(open, fix);
+
+    el.append(info, actions);
+    packFixNamesList.appendChild(el);
+  }
+  const n = rows.length;
+  packFixNamesSummary.textContent = `${n} ${n === 1 ? 'name' : 'names'} to fix`;
+  packFixNamesPanel.classList.toggle('hidden', n === 0);
+
+  // ── Retry panel ──
+  packFixRetryList.innerHTML = '';
+  const retry = [...packFailures.values()].filter((fl) => fl.fixGroup === 'retry');
+  for (const fl of retry) {
+    const el = document.createElement('div');
+    el.className = 'fix-group-row pack-fix-row';
+    el.dataset.folderPath = fl.folderPath;
+
+    const info = document.createElement('div');
+    info.className = 'pack-fix-retry-info';
+    const name = document.createElement('span');
+    name.className   = 'fix-group-from';
+    name.textContent = fl.folder + '\\';
+    const msg = document.createElement('span');
+    msg.className   = 'pack-fix-message';
+    msg.textContent = fl.message;
+    const fixLine = document.createElement('span');
+    fixLine.className   = 'pack-fix-fixline';
+    fixLine.textContent = `Fix: ${fl.fix}`;
+    info.append(name, msg, fixLine);
+
+    const actions = document.createElement('div');
+    actions.className = 'fix-group-actions';
+    const open = document.createElement('button');
+    open.className   = 'fix-row-open';
+    open.textContent = 'Open Folder';
+    open.title       = 'Open this folder in Explorer.';
+    open.addEventListener('click', () => electron.invoke('shell:openPath', fl.folderPath));
+    const btn = document.createElement('button');
+    btn.className   = 'btn btn-fix-apply';
+    btn.textContent = 'Retry';
+    btn.title       = `Pack "${fl.folder}" again.`;
+    btn.addEventListener('click', () => startPackRun([fl.folderPath]));
+    actions.append(open, btn);
+
+    el.append(info, actions);
+    packFixRetryList.appendChild(el);
+  }
+  const m = retry.length;
+  packFixRetrySummary.textContent = `${m} ${m === 1 ? 'folder' : 'folders'} to pack again`;
+  packFixRetryPanel.classList.toggle('hidden', m === 0);
+
+  updatePackFixControls();
+  refreshPackFixPreviews();
+}
+
+/** Ask the main process what each Names row would be renamed to right now. */
+let packFixPreviewSeq = 0;            // only the latest preview request is applied
+async function refreshPackFixPreviews() {
+  const rows = packNameRows();
+  if (rows.length === 0) return;
+  const seq   = ++packFixPreviewSeq;
+  const items = rows.map((r) => ({ folderPath: r.folderPath, relPath: r.relPath, mode: packFixModes.get(r.key) || 'remove' }));
+  const results = await electron.invoke('folderpack:previewRenames', items);
+  if (seq !== packFixPreviewSeq) return;
+  packFixPreviews = new Map(rows.map((r, i) => [r.key, results[i]]));
+  for (const r of rows) {
+    const el = packFixRowEls.get(r.key);
+    if (!el) continue;
+    const pv = packFixPreviews.get(r.key);
+    const to = el.querySelector('.fix-group-to');
+    const badge = el.querySelector('.fix-conflict-badge');
+    const fix = el.querySelector('.btn-fix-apply');
+    if (pv && pv.ok) {
+      to.textContent = `"${pv.newName}${r.isDir ? '\\' : ''}"`;
+      badge.classList.toggle('hidden', !pv.conflict);
+      fix.title = `Rename to "${pv.newName}".`;
+    } else {
+      to.textContent = '';
+      badge.classList.add('hidden');
+      const err = el.querySelector('.pack-fix-error');
+      err.textContent = (pv && pv.error) || '';
+      err.classList.toggle('hidden', !(pv && pv.error));
+    }
+  }
+  updatePackFixControls();
+}
+
+/**
+ * Rename the given Names rows one after another (each with its current mode),
+ * then pack again — automatically — every folder whose last bad name is now
+ * fixed (ruling 8).
+ */
+async function fixPackRows(rows) {
+  if (isFixing || packFixBusy || rows.length === 0) return;
+  packFixBusy = true;
+  updatePackFixControls();
+  const repack = [];
+  for (const row of rows) {
+    const mode = packFixModes.get(row.key) || 'remove';
+    const res  = await electron.invoke('folderpack:renameEntry',
+      { folderPath: row.folderPath, relPath: row.relPath, cause: row.cause, char: row.char, mode });
+    const oldRel = joinWin(row.folderRel, row.relPath);
+    if (res && res.success) {
+      packFixErrors.delete(row.key);
+      appendLog(`Renamed: "${oldRel}" → "${joinWin(row.folderRel, res.newRelPath)}"`, 'success',
+        joinWin(row.folderPath, relDirOf(res.newRelPath)), 'Open this folder in Explorer.');
+      const fl = packFailures.get(row.folderPath);
+      if (fl) {
+        fl.records = fl.records.filter((r) => r.file !== row.relPath);
+        if (fl.records.length === 0) { packFailures.delete(row.folderPath); repack.push(row.folderPath); }
+      }
+    } else {
+      const error = (res && res.error) || 'Rename failed.';
+      packFixErrors.set(row.key, error);
+      appendLog(`Failed to rename "${oldRel}": ${error}`, 'error');
+    }
+  }
+  packFixBusy = false;
+  renderPackFix();
+  if (repack.length > 0) startPackRun(repack);
+}
+
+/** Pack the given folders (from the last scan) again — Retry, Retry All and the auto-repack. */
+async function startPackRun(folderPaths) {
+  if (!fixFolder || isFixing || folderPaths.length === 0) return;
+  fixStart = Date.now();
+  setBundleBusy(true);
+  cancelFixBtn.disabled = false;
+  fixProgressWrap.classList.remove('hidden');
+  fixProgressFill.style.width  = '0%';
+  fixProgressLabel.textContent = 'Converting…';
+  fixEtaLabel.textContent      = '';
+  await electron.invoke('folderpack:convert', { folder: fixFolder, selectedFolderPaths: folderPaths });
+}
+
+packRetryAllBtn.addEventListener('click', () => {
+  startPackRun([...packFailures.values()].filter((fl) => fl.fixGroup === 'retry').map((fl) => fl.folderPath));
+});
+
+// Fix All — a confirm modal first (ruling 9), listing old → new.
+packFixAllBtn.addEventListener('click', () => {
+  const rows = packNameRows();
+  if (rows.length === 0 || isFixing || packFixBusy) return;
+  const n = rows.length;
+  packFixModalTitle.textContent = `Rename ${n} ${n === 1 ? 'Item' : 'Items'}?`;
+  packFixModalList.innerHTML = '';
+  for (const r of rows) {
+    const pv = packFixPreviews.get(r.key);
+    const div = document.createElement('div');
+    div.className   = 'dl-item pack-fix-name';
+    div.textContent = `"${joinWin(r.folderRel, r.relPath)}" → "${pv && pv.ok ? pv.newName : '?'}"`;
+    packFixModalList.appendChild(div);
+  }
+  packFixModal.classList.remove('hidden');
+});
+
+packFixCancelBtn.addEventListener('click', () => packFixModal.classList.add('hidden'));
+
+packFixConfirmBtn.addEventListener('click', () => {
+  packFixModal.classList.add('hidden');
+  fixPackRows(packNameRows());
 });

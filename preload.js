@@ -35,6 +35,7 @@ const INVOKE_CHANNELS = new Set([
   // main.js — folder-packer
   'folderpack:scan', 'folderpack:convert', 'folderpack:rename',
   'folderpack:cancel', 'folderpack:deleteFolder',
+  'folderpack:previewRenames', 'folderpack:renameEntry',
 ]);
 
 // Channels the main process sends TO the renderer.  Only channels that the
