@@ -2621,7 +2621,7 @@ async function refreshPackFixPreviews() {
     const badge = el.querySelector('.fix-conflict-badge');
     const fix = el.querySelector('.btn-fix-apply');
     if (pv && pv.ok) {
-      to.textContent = `"${pv.newName}${r.isDir ? '\\' : ''}"`;
+      to.textContent = `"${pv.newRelPath}${r.isDir ? '\\' : ''}"`;
       badge.classList.toggle('hidden', !pv.conflict);
       fix.title = `Rename to "${pv.newName}".`;
     } else {
@@ -2698,7 +2698,7 @@ packFixAllBtn.addEventListener('click', () => {
     const pv = packFixPreviews.get(r.key);
     const div = document.createElement('div');
     div.className   = 'dl-item pack-fix-name';
-    div.textContent = `"${joinWin(r.folderRel, r.relPath)}" → "${pv && pv.ok ? pv.newName : '?'}"`;
+    div.textContent = `"${joinWin(r.folderRel, r.relPath)}" → "${pv && pv.ok ? joinWin(r.folderRel, pv.newRelPath) : '?'}"`;
     packFixModalList.appendChild(div);
   }
   packFixModal.classList.remove('hidden');

@@ -14,11 +14,12 @@ const fs     = require('fs');
 const path   = require('path');
 const crypto = require('crypto');
 const { execFilePromise } = require('./exec');
-const { sevenZipArgs, listFileContent } = require('./seven-zip');
+const { sevenZipArgs, listFileContent, longPath } = require('./seven-zip');
 const { getSevenZip } = require('./tools');
 const { validateCbz, testIntegrity, listEntries, compareEntries } = require('./validator');
 const { sizePair } = require('./format');
 const { tempRoot } = require('./temp');
+const { isDeviceName, avoidDeviceName } = require('./winname');
 
 const ARCHIVE_FOLDER_EXTS = new Set(['.cbr', '.cbz', '.rar', '.zip']);
 const IMAGE_EXTS           = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.avif']);
@@ -30,8 +31,12 @@ function naturalSort(a, b) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 }
 
-/** Find a non-conflicting folder path (strips ext from baseName, then adds (1)…) */
+/**
+ * Find a non-conflicting folder path (strips ext from baseName, then adds (1)…).
+ * A Windows device name ("Aux") gets Judy's `_` rule first ("Aux_").
+ */
 function resolveTargetFolder(parentDir, baseName) {
+  baseName = avoidDeviceName(baseName);
   const base = path.join(parentDir, baseName);
   if (!fs.existsSync(base)) return base;
   let n = 1;
@@ -39,8 +44,12 @@ function resolveTargetFolder(parentDir, baseName) {
   return path.join(parentDir, `${baseName} (${n})`);
 }
 
-/** Find a non-conflicting CBZ path. Returns { targetPath, conflict } */
+/**
+ * Find a non-conflicting CBZ path. Returns { targetPath, conflict }.
+ * A Windows device name ("nul") gets Judy's `_` rule first ("nul_.cbz").
+ */
 function resolveTargetCbz(parentDir, baseName) {
+  baseName = avoidDeviceName(baseName);
   const base = path.join(parentDir, `${baseName}.cbz`);
   if (!fs.existsSync(base)) return { targetPath: base, conflict: false };
   let n = 1;
@@ -94,7 +103,6 @@ function folderHasArchives(dir) {
 // can't be packed and read back reliably (extracting such a CBZ on Windows
 // renames the entry).  Checked before anything is packed; the interactive
 // fix flow (renameEntry) renames the entry on disk.
-const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\s*\..*)?$/i;
 const INVALID_CHAR  = /[<>:"|?*\x00-\x1f]/;   // `/` and `\` can't occur in a directory entry
 
 // Windows' own thumbnail cache and folder-view settings: never packed into a
@@ -111,14 +119,15 @@ function unstorableName(name) {
   }
   if (name.endsWith(' '))       return { cause: 'name-trailing-space' };
   if (name.endsWith('.'))       return { cause: 'name-trailing-dot' };
-  if (RESERVED_NAME.test(name)) return { cause: 'name-reserved' };
+  if (isDeviceName(name))       return { cause: 'name-reserved' };
   return null;
 }
 
 /**
  * Everything under an ext-folder, as paths relative to it:
  *   files    – { rel, size } for every regular file, in walk order
- *              (Thumbs.db / desktop.ini left out — see JUNK_FILES)
+ *              (Thumbs.db / desktop.ini FILES left out — see JUNK_FILES)
+ *   junk     – those left-out files' paths (7-Zip excludes exactly these)
  *   dirs     – every folder
  *   problems – failure records (file, cause, detail, isDir) for names Windows
  *              can't use as-is and for entries that are neither a file nor a
@@ -126,11 +135,11 @@ function unstorableName(name) {
  * Throws if a folder can't be read.
  */
 function walkSource(root) {
-  const files = [], dirs = [], problems = [];
+  const files = [], dirs = [], problems = [], junk = [];
   (function walk(dir, relDir) {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const rel = relDir ? path.join(relDir, e.name) : e.name;
-      if (e.isFile() && isJunkFile(e.name)) continue;
+      if (e.isFile() && isJunkFile(e.name)) { junk.push(rel); continue; }
       const bad = unstorableName(e.name);
       if (bad) {
         problems.push({ file: rel, ...bad, isDir: e.isDirectory(), detail: `Name Windows can't store: ${JSON.stringify(rel)}` });
@@ -141,7 +150,7 @@ function walkSource(root) {
       problems.push({ file: rel, cause: 'unsupported-entry', detail: `"${rel}" is a link or special file, not a regular file or folder.` });
     }
   })(root, '');
-  return { files, dirs, problems };
+  return { files, dirs, problems, junk };
 }
 
 /** A structured folder-pack failure, carrying one or more records. */
@@ -364,7 +373,7 @@ async function applyConvertFolders(rootDir, groups, log, sendProgress, signal) {
  *   folder for the files at its root.
  * A subfolder with no files anywhere in it has no CBZ to go in, so it fails
  * the folder rather than being dropped.
- * Returns { jobs: [{ name, srcDir, prefix, files: [{rel,size}], dirs }], problems }
+ * Returns { jobs: [{ name, srcDir, prefix, files: [{rel,size}], dirs, junk }], problems }
  * with every path in a job relative to its srcDir.
  */
 function planJobs(folderPath, baseName, src) {
@@ -374,7 +383,7 @@ function planJobs(folderPath, baseName, src) {
   const topDirs   = src.dirs.filter(top).sort(naturalSort);
 
   if (topDirs.length === 0) {
-    jobs.push({ name: baseName, srcDir: folderPath, prefix: '', files: rootFiles, dirs: [] });
+    jobs.push({ name: baseName, srcDir: folderPath, prefix: '', files: rootFiles, dirs: [], junk: [] });
     return { jobs, problems };
   }
   for (const d of topDirs) {
@@ -385,9 +394,10 @@ function planJobs(folderPath, baseName, src) {
       continue;
     }
     const dirs = src.dirs.filter((x) => x.startsWith(pre)).map((x) => x.slice(pre.length));
-    jobs.push({ name: d, srcDir: path.join(folderPath, d), prefix: pre, files, dirs });
+    const junk = (src.junk || []).filter((x) => x.startsWith(pre)).map((x) => x.slice(pre.length));
+    jobs.push({ name: d, srcDir: path.join(folderPath, d), prefix: pre, files, dirs, junk });
   }
-  if (rootFiles.length > 0) jobs.push({ name: baseName, srcDir: folderPath, prefix: '', files: rootFiles, dirs: [] });
+  if (rootFiles.length > 0) jobs.push({ name: baseName, srcDir: folderPath, prefix: '', files: rootFiles, dirs: [], junk: [] });
   return { jobs, problems };
 }
 
@@ -441,13 +451,6 @@ async function packFolder(sz, folderPath, baseName, parentDir, log, signal) {
   return outputPaths;
 }
 
-// On Windows, prefix `\\?\` so 7-Zip opens paths longer than MAX_PATH.
-function longPath(p) {
-  if (process.platform !== 'win32' || !path.isAbsolute(p)) return p;
-  if (p.startsWith('\\\\')) return p;
-  return '\\\\?\\' + path.normalize(p);
-}
-
 /**
  * Pack one planned job to `targetPath` and check it.  Returns failure
  * records (file paths relative to the ext-folder; empty when the CBZ is good).
@@ -460,20 +463,29 @@ function longPath(p) {
  *     relative to the subfolder, recursing, empty folders included;
  *   • the root CBZ (or a folder with no subfolders): a listfile of the root
  *     files' absolute paths — 7-Zip stores each by its bare name.
- * Thumbs.db and desktop.ini are excluded at any depth (`-xr!`).
+ * Thumbs.db / desktop.ini FILES are excluded one by one, by their own path
+ * (an exclude listfile, `-x@`): a folder with one of those names is packed like
+ * any other.  (`-xr!Thumbs.db` excluded folders of that name too, and the
+ * exact-copy check then failed the folder.)  The root CBZ's listfile simply
+ * doesn't list them.
  */
 async function packJob(sz, job, targetPath, signal, folderPath) {
   const rel        = (p) => job.prefix + p;       // job path → path in the ext-folder
   const imageCount = job.files.filter((f) => IMAGE_EXTS.has(path.extname(f.rel).toLowerCase())).length;
   const target     = longPath(targetPath);
-  const switches   = ['-tzip', '-mx=0', '-sccUTF-8', ...[...JUNK_FILES].map((n) => `-xr!${n}`)];
+  const switches   = ['-tzip', '-mx=0', '-sccUTF-8'];
 
-  // The listfile lives in this install's temp folder (cbz_ prefix: the
-  // startup sweep removes it after a crash) — never in the folder being
-  // packed, where it would overwrite a file of the same name.
-  let listPath = null;
+  // The listfiles live in this install's temp folder (cbz_ prefix: the
+  // startup sweep removes them after a crash) — never in the folder being
+  // packed, where one would overwrite a file of the same name.
+  let listPath = null, excludePath = null;
   let args;
   if (job.prefix) {
+    if (job.junk && job.junk.length > 0) {
+      excludePath = path.join(tempRoot(), `cbz_pack_${crypto.randomBytes(6).toString('hex')}.exclude.lst`);
+      fs.writeFileSync(excludePath, listFileContent(job.junk), 'utf8');
+      switches.push(`-x@${excludePath}`);
+    }
     args = sevenZipArgs('a', switches, target, longPath(job.srcDir) + '\\*');
   } else {
     listPath = path.join(tempRoot(), `cbz_pack_${crypto.randomBytes(6).toString('hex')}.lst`);
@@ -507,6 +519,7 @@ async function packJob(sz, job, targetPath, signal, folderPath) {
     // Other warnings only — the checks below decide.
   } finally {
     if (listPath) { try { fs.unlinkSync(listPath); } catch {} }
+    if (excludePath) { try { fs.unlinkSync(excludePath); } catch {} }
   }
 
   // Exact-copy check against the folder: every file with its size, every folder.
@@ -628,10 +641,7 @@ function sanitizeName(name, mode = 'remove') {
   const replace = mode === 'replace';
   let n = name.replace(/[<>:"|?*\x00-\x1f]/g, replace ? '_' : '');
   n = n.replace(/[ .]+$/, replace ? '_' : '');
-  const dot  = n.indexOf('.');
-  const base = dot < 0 ? n : n.slice(0, dot);
-  const stem = base.replace(/\s+$/, '');
-  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(stem)) n = stem + '_' + n.slice(stem.length);
+  n = avoidDeviceName(n);
   return n || '_';
 }
 
@@ -660,7 +670,7 @@ function resolveNameConflict(dir, name, isDir, taken = new Set()) {
  */
 function checkRenameRequest(scannedFolders, folderPath, relPath) {
   if (typeof folderPath !== 'string' || !scannedFolders.some((f) => f === folderPath)) {
-    return { ok: false, error: 'Folder is not in the last scan.' };
+    return { ok: false, error: 'Folder is not in the last scan. Scan Ext-Folders again, then retry.' };
   }
   if (typeof relPath !== 'string' || !relPath || path.isAbsolute(relPath)) {
     return { ok: false, error: 'Path is outside the folder.' };
@@ -671,7 +681,7 @@ function checkRenameRequest(scannedFolders, folderPath, relPath) {
     return { ok: false, error: 'Path is outside the folder.' };
   }
   let st;
-  try { st = fs.lstatSync(oldPath); } catch { return { ok: false, error: 'File or folder not found.' }; }
+  try { st = fs.lstatSync(oldPath); } catch { return { ok: false, error: 'File or folder not found. It may have moved — scan Ext-Folders again.' }; }
   const name = path.basename(oldPath);
   if (!unstorableName(name)) return { ok: false, error: 'Name has nothing to fix.' };
   return { ok: true, oldPath, dir: path.dirname(oldPath), name, isDir: st.isDirectory() };
@@ -714,10 +724,11 @@ function renameEntry(scannedFolders, req) {
     return { success: false, error: 'Path is outside the folder.' };
   }
   try {
-    if (fs.existsSync(newPath)) return { success: false, error: `"${name}" already exists.` };
+    if (fs.existsSync(newPath)) return { success: false, error: `"${name}" already exists. Click Fix again to use the next available name.` };
     fs.renameSync(c.oldPath, newPath);
   } catch (err) {
-    return { success: false, error: err.message };
+    // No full paths in the message (Judy): the name and the error code only.
+    return { success: false, error: `"${c.name}" couldn't be renamed (${err.code || 'unknown error'}). Close anything using it, then try Fix again.` };
   }
   return { success: true, newRelPath: back, newName: name, conflict };
 }

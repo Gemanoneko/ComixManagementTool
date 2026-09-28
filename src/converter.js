@@ -2,12 +2,14 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFilePromise } = require('./exec');
-const { sevenZipArgs, listFileContent } = require('./seven-zip');
+const { sevenZipArgs, listFileContent, longPath, errorLine } = require('./seven-zip');
 const { scanForFiles } = require('./scanner');
 const { validateCbz, countImageEntries } = require('./validator');
 const { buildOutputName } = require('./renamer');
 const { getSevenZip, getImageMagick } = require('./tools');
 const { tempRoot } = require('./temp');
+const { avoidDeviceName } = require('./winname');
+const crypto = require('crypto');
 
 const PDF_DPI = 170;
 
@@ -137,6 +139,9 @@ async function checkExistingOutput(cbzPath, expectedImageCount, signal) {
  */
 function claimOutputPath(claims, dir, name, ext = '.cbz') {
   const keyOf = (p) => path.resolve(p).toLowerCase(); // Windows names are case-insensitive
+  // Never a Windows device name ("nul.cbz" is one, "con (1).cbz" is not):
+  // Judy's `_` rule, as the fix flow renames — "nul" → "nul_.cbz".
+  name = avoidDeviceName(name);
   let candidate = path.join(dir, name + ext);
   for (let n = 1; claims.has(keyOf(candidate)); n++) candidate = path.join(dir, `${name} (${n})${ext}`);
   claims.add(keyOf(candidate));
@@ -705,7 +710,7 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
       if (packed) outputs.push(packed);
     } else {
       // Intermediate folder — create matching output subdir and recurse
-      const subOut = path.join(outDir, sub.name);
+      const subOut = path.join(outDir, avoidDeviceName(sub.name));
       fs.mkdirSync(subOut, { recursive: true });
       const subOutputs = await processDirectoryTree(subSrc, subOut, isManga, log, signal, waitIfPaused, tree);
       outputs.push(...subOutputs);
@@ -839,6 +844,12 @@ async function copyNestedCbz(archive, outDir, log, signal, tree) {
  * abort leaves an orphan .cbz.tmp (never matched by the .cbz extension filters)
  * that the next run ignores, so the source is safely re-processed.
  *
+ * 7-Zip gets only absolute `\\?\` paths — a listfile of the pages' full
+ * paths (stored by their bare names, so the CBZ stays flat) — and never runs
+ * inside the extraction folder.  It used to run with that folder as its
+ * working directory, and Windows refuses a working directory of 259+
+ * characters: an archive with deep internal folders could not be converted.
+ *
  * Rename semantics: `fs.promises.rename` only overwrites an existing target on
  * POSIX; on Windows it fails if the destination exists. That's why the caller
  * always either (a) does not call us at all when `outputPath` already exists
@@ -853,20 +864,16 @@ async function copyNestedCbz(archive, outDir, log, signal, tree) {
 async function packToCbz(imageFiles, outputPath, signal) {
   const sevenZip = getSevenZip();
   if (!sevenZip) throw withCause(new Error('7-Zip not found — cannot pack CBZ'), '7zip-missing');
-  // All files in a single pack call are in the same directory (CBZ is flat).
-  const srcDir   = path.dirname(imageFiles[0]);
-  const basenames = imageFiles.map((f) => path.basename(f));
-  // List file lives inside the temp dir (srcDir is always inside cbz_* tmpDir)
-  // so it is auto-removed by removeTempDir and by the startup orphan cleanup.
-  const listPath = path.join(srcDir, '.cbzpack.lst');
+  // The listfile lives in this install's temp folder (cbz_ prefix: the
+  // startup sweep removes it after a crash).
+  const listPath = path.join(tempRoot(), `cbz_pack_${crypto.randomBytes(6).toString('hex')}.lst`);
   const tmpOutputPath = outputPath + '.tmp';
-  fs.writeFileSync(listPath, listFileContent(basenames), 'utf8');
+  fs.writeFileSync(listPath, listFileContent(imageFiles.map((f) => longPath(path.resolve(f)))), 'utf8');
   // If a stale .tmp already exists from a prior crash/abort, remove it so
   // 7-Zip doesn't try to append to it (it creates-or-updates by default).
   try { fs.unlinkSync(tmpOutputPath); } catch { /* ignore — may not exist */ }
   try {
     // -tzip: ZIP container  -mx=0: store (images are already compressed)
-    // cwd=srcDir: 7-Zip adds files by basename → no directory prefix in archive
     await execFilePromise(
       sevenZip,
       // `@listPath` is a 7-Zip listfile switch — the helper detects it and
@@ -875,9 +882,9 @@ async function packToCbz(imageFiles, outputPath, signal) {
       // The helper neutralises any operand starting with `-` by prefixing
       // `.\` so a switch-injection through `tmpOutputPath` still cannot
       // happen even without `--`.
-      sevenZipArgs('a', ['-tzip', '-mx=0', `@${listPath}`], tmpOutputPath),
+      sevenZipArgs('a', ['-tzip', '-mx=0', `@${listPath}`], longPath(tmpOutputPath)),
       signal,
-      { cwd: srcDir },
+      { cwd: tempRoot() },
     );
   } catch (err) {
     // Delete any partial .tmp so it doesn't linger as a stale orphan.
@@ -905,7 +912,7 @@ async function packToCbz(imageFiles, outputPath, signal) {
  */
 async function packAndValidate(files, outputPath, expectedImageCount, signal) {
   const tmpPath = await packToCbz(files, outputPath, signal);
-  const validation = await validateCbz(tmpPath, expectedImageCount);
+  const validation = await validateCbz(longPath(tmpPath), expectedImageCount);
   if (!validation.valid) {
     try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     return { success: false, outputPath, reason: validation.reason,
@@ -1023,9 +1030,9 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
     const contentDir = getEffectiveContentDir(tmpDir, baseName);
 
     if (isComplexStructure(contentDir)) {
-      const wrapperOutDir = path.join(outDir, baseName);
+      const wrapperOutDir = path.join(outDir, avoidDeviceName(baseName));
       fs.mkdirSync(wrapperOutDir, { recursive: true });
-      log(`  Hierarchical structure — processing into ${baseName}/`, 'info');
+      log(`  Hierarchical structure — processing into ${path.basename(wrapperOutDir)}/`, 'info');
       const tree      = { claims, pagesDone: 0, failures: [], skipped: 0 };
       const treePages = deepImages(contentDir).length;
       const outputs   = await processDirectoryTree(contentDir, wrapperOutDir, isManga, log, signal, waitIfPaused, tree);
@@ -1081,9 +1088,9 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
     // Single-output stays flat alongside the original archive.
     let groupOutDir = outDir;
     if (groups.length > 1) {
-      groupOutDir = path.join(outDir, baseName);
+      groupOutDir = path.join(outDir, avoidDeviceName(baseName));
       fs.mkdirSync(groupOutDir, { recursive: true });
-      log(`  Split into ${groups.length} archives → ${baseName}\\`, 'info');
+      log(`  Split into ${groups.length} archives → ${path.basename(groupOutDir)}\\`, 'info');
     }
 
     // 4. Create a CBZ for each group
@@ -1303,12 +1310,6 @@ function logSummary(outcomes, rootFolder, log) {
 
 // ─── End-of-run failure block (Judy's spec, ruling 15) ─────────────────────────
 
-/** First non-empty line of a child process's stderr, else the error message. */
-function firstErrorLine(err) {
-  const line = String(err?.stderr || '').split(/\r?\n/).map((l) => l.trim()).find(Boolean);
-  return line || String(err?.message || err || '').split(/\r?\n/)[0];
-}
-
 /**
  * Message + Fix for one file that failed to convert: `o` is an outcome
  * ({ file, result } or { file, err }).  Causes come from structured fields
@@ -1326,9 +1327,9 @@ function describeConvertFailure(o) {
         fix: 'Install ImageMagick 7 from imagemagick.org, then convert this file again.' };
       case 'unsafe-path':    return { message: `"${path.basename(o.file)}" has a page name that points outside its own folder — treated as unsafe, not converted.`,
         fix: 'Get a clean copy of this file, then convert it again.' };
-      case 'magick-error':   return { message: firstErrorLine(err),
+      case 'magick-error':   return { message: errorLine(err),
         fix: "Convert it again — if it keeps failing, check that the PDF isn't password-protected or corrupt." };
-      default:               return { message: firstErrorLine(err),
+      default:               return { message: errorLine(err),
         fix: 'Convert it again — if it keeps failing, the file itself may be corrupt.' };
     }
   }

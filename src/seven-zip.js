@@ -49,6 +49,8 @@
  *        a `.\` prefix if it would otherwise start with `-`.)
  */
 
+const path = require('path');
+
 // Prefix that disambiguates a path beginning with `-` from a switch, without
 // changing what 7-Zip ultimately writes/reads. `.\foo` and `foo` resolve to
 // the same file on Windows; same for `./foo` on POSIX.
@@ -120,4 +122,38 @@ function listFileContent(names) {
   return names.map((n) => `"${n}"`).join('\n');
 }
 
-module.exports = { sevenZipArgs, listFileContent };
+/**
+ * On Windows, prefix `\\?\` to an absolute path so 7-Zip opens it however long
+ * it is (MAX_PATH) and whatever its name (a `\\?\` path is taken literally).
+ */
+function longPath(p) {
+  if (process.platform !== 'win32' || !path.isAbsolute(p)) return p;
+  if (p.startsWith('\\\\')) return p;            // already UNC or \\?\
+  return '\\\\?\\' + path.normalize(p);
+}
+
+/**
+ * The one line of a failed 7-Zip (or other tool) run to show the user.
+ * 7-Zip often starts with a bare "ERROR: <path>" line and puts the reason
+ * after it: on the next line ("Cannot open the file as archive"), or after
+ * the same path repeated once more ("Open ERROR: Cannot open the file as
+ * [zip] archive").  Then that reason line is shown.  Otherwise the first
+ * non-empty line of stderr, else of the message.
+ *
+ * @param {Error & { stderr?: string }} err
+ * @returns {string}
+ */
+function errorLine(err) {
+  const lines = String((err && err.stderr) || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const bare = (s) => s.replace(/^\\\\\?\\/, '').toLowerCase();
+  for (let i = 0; i < lines.length - 1; i++) {
+    const m = lines[i].match(/^ERROR:\s+(.*)$/);
+    if (!m || !/^(?:[A-Za-z]:[\\/]|\\\\)/.test(m[1]) || /\s:\s/.test(m[1])) continue;
+    let j = i + 1;
+    while (j < lines.length && bare(lines[j]) === bare(m[1])) j++;   // the path, repeated
+    if (j < lines.length) return lines[j];
+  }
+  return lines[0] || String((err && err.message) || err || '').split(/\r?\n/)[0];
+}
+
+module.exports = { sevenZipArgs, listFileContent, longPath, errorLine };

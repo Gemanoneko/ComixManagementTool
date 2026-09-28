@@ -6,7 +6,7 @@ const os     = require('os');
 const crypto = require('crypto');
 
 const { execFilePromise } = require('./exec');
-const { sevenZipArgs, listFileContent } = require('./seven-zip');
+const { sevenZipArgs, listFileContent, errorLine } = require('./seven-zip');
 const { getSevenZip, getImageMagick } = require('./tools');
 const { validateCbz, countImageEntries, listEntries, compareEntries } = require('./validator');
 const { tempRoot } = require('./temp');
@@ -508,12 +508,10 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         if (tmpCbz) try { await fs.promises.unlink(tmpCbz); } catch {}
         const reason = err.stderr?.trim() || err.message;
         log(`ERROR: ${reason}`, 'error');
-        // For the end-of-run block: only the first non-empty line of the
-        // 7-Zip / ImageMagick output, not all of it.
-        const first = String(err.stderr || '').split(/\r?\n/).map((l) => l.trim()).find(Boolean)
-          || String(err.message || '').split(/\r?\n/)[0];
+        // For the end-of-run block: one line of the 7-Zip / ImageMagick
+        // output, not all of it (errorLine: the reason, not a bare path).
         errors.push({ file: cbzPath, reason, ...(err.resizeFailure || {
-          message: first,
+          message: errorLine(err),
           fix: "Resize it again — if it keeps failing, check that the file isn't corrupt, in use, or password-protected.",
         }) });
       } finally {
