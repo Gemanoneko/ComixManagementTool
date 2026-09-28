@@ -92,9 +92,9 @@ app.whenReady().then(() => {
   ipcMain.handle('check-update', () => checkForUpdates());
 });
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+// Windows-only tool: closing the last window always quits — no darwin exception
+// (Studio ProcessRules § The close button must always quit the process).
+app.on('window-all-closed', () => app.quit());
 
 // Abort any running child processes before quitting so the event loop drains
 // cleanly. Without this, awaited execFile handles keep the process alive even

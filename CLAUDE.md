@@ -18,22 +18,35 @@ npm start            # launches the Electron app (dev mode)
 ## Building
 
 ```bash
-npm run prepare-vendor   # copies 7z.exe + 7z.dll from C:\Program Files\7-Zip into vendor/7zip/
-npm run dist             # local portable build (dir target + icon stamp) → dist/win-unpacked/
-npm run pack             # local NSIS installer (no publish) → dist/
-npm run build            # CI: NSIS installer + publish to GitHub Releases
+npm run prepare-vendor   # copies 7z.exe + 7z.dll from C:\Program Files\7-Zip into vendor/7zip/ — run before any build
+npm run pack             # local NSIS installer, NEVER publishes → dist/ComixManagementTool Setup <version>.exe (+ dist/win-unpacked/)
+npm run dist             # same installer as `pack`, then re-stamps the icon onto dist/win-unpacked/ComixManagementTool.exe only (needs the gitignored scripts/rcedit-x64.exe)
+npm run build            # CI ONLY: NSIS installer + publish to GitHub Releases — refuses to run outside GitHub Actions (scripts/ci-publish-guard.mjs)
 ```
+
+**Packaged-build QA (pre-release smoke test):** build the real installer with publishing disabled, then install and test that — never the dev build:
+
+```bash
+npm run prepare-vendor && npm run pack
+# → dist/ComixManagementTool Setup <version>.exe
+```
+
+Same electron-builder config and NSIS target CI uses; only publishing is off, so nothing reaches GitHub. Type `npm run pack` — plain `npm pack` is npm's built-in tarball command and produces a `.tgz`, not an installer.
 
 **What gets bundled:** adm-zip (JS), electron-updater, 7-Zip (`vendor/7zip/`).
 **Not bundled:** ImageMagick — the app auto-detects it at runtime from `C:\Program Files\ImageMagick*\magick.exe` or PATH. PDF conversion will fail gracefully if ImageMagick is missing.
 
 ## Releasing
 
-1. Bump version in `package.json`, commit with `v{version}: description`
-2. Tag and push: `git tag v{version} && git push && git push origin v{version}`
-3. GitHub Actions (`.github/workflows/build.yml`) builds the NSIS installer and creates a GitHub Release
-4. Post-build `scripts/cleanup-releases.js` auto-deletes old releases (keeps 4)
+The only release path is a **named-tag push → GitHub Actions**. Nothing is published from a local machine.
+
+1. Bump `version` in `package.json` and sync `package-lock.json` in the same commit (`npm install --package-lock-only`); commit with `v{version}: description`
+2. Tag and push — named tag only, never `--tags`: `git tag v{version} && git push && git push origin v{version}`
+3. GitHub Actions (`.github/workflows/build.yml`) runs `npm run build` → builds the NSIS installer and publishes the GitHub Release
+4. A separate final workflow step runs `scripts/cleanup-releases.js` (keeps the newest 4 releases) with `continue-on-error: true` — a cleanup failure is flagged on the run but never fails a release that already published
 5. Installed apps auto-check for updates 5s after launch via `electron-updater`
+
+**`npm run release` is disabled on purpose:** `scripts/release.mjs` exits 1 with a message pointing here, because a laptop publish would collide with CI publishing the same version. `npm run build` likewise refuses outside GitHub Actions. For a local installer that is never published, use `npm run pack` (see Building).
 
 ## External Dependencies (must be installed separately)
 

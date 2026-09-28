@@ -29,7 +29,22 @@ jobs:
       - name: Bundle 7-Zip into vendor/
         run: npm run prepare-vendor
 
+      # Build + publish must fail the run on any error; never add
+      # continue-on-error here. A build that silently produced nothing is a
+      # failed release. (`npm run build` refuses to run outside GitHub Actions;
+      # see scripts/ci-publish-guard.mjs.)
       - name: Build and publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npm run build
+
+      # Final step: prune old releases, keeping the newest 4 (release + tag).
+      # continue-on-error: a cleanup hiccup (API rate limit, network) is flagged
+      # on the run but never fails a release that has already been published.
+      # Runs only when every step above succeeded (default `if: success()`), so
+      # a failed publish never triggers deletion of older releases.
+      - name: Clean up old releases (keep newest 4)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/cleanup-releases.js

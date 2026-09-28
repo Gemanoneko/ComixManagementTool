@@ -33,3 +33,5 @@ Thumbs.db
 .vscode/
 *.suo
 *.user
+
+scratch/ # local scratch dir — see Team/Docs/ProcessRules.md § Repository Hygiene
