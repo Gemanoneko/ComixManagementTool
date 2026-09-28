@@ -88,9 +88,15 @@ function createWindow() {
   mainWindow.webContents.on('will-navigate', (e) => e.preventDefault());
 }
 
+// Paths of the "<name>.cbz.<hex>.resize.tmp" siblings resize:confirm creates
+// when it has to copy across drives.  A crash mid-replace can leave one beside
+// the (still intact) original; the next launch removes it, silently.
+const resizeJournalPath = path.join(app.getPath('userData'), 'resize-pending.txt');
+
 app.whenReady().then(() => {
   cleanupOrphanedTempDirs();
   createWindow();
+  require('./src/resizer').sweepResizeLeftovers(resizeJournalPath).catch(() => {}); // async, silent
 
   const { setupUpdater, checkForUpdates } = require('./src/updater');
   setupUpdater(mainWindow);
@@ -421,7 +427,7 @@ ipcMain.handle('resize:confirm', async (event, items) => {
   const results = [];
   for (const { original, tmp } of items) {
     try {
-      await replaceWithResized(tmp, original);
+      await replaceWithResized(tmp, original, resizeJournalPath);
       results.push({ file: original, success: true });
     } catch (err) {
       results.push({ file: original, success: false, error: err.message });

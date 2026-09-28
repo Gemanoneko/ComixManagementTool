@@ -4,7 +4,7 @@ const os = require('os');
 const { execFilePromise } = require('./exec');
 const { sevenZipArgs, listFileContent } = require('./seven-zip');
 const { scanForFiles } = require('./scanner');
-const { validateCbz } = require('./validator');
+const { validateCbz, countImageEntries } = require('./validator');
 const { buildOutputName } = require('./renamer');
 const { getSevenZip, getImageMagick } = require('./tools');
 
@@ -92,6 +92,47 @@ async function canOpenCbz(cbzPath) {
   }
 }
 
+/**
+ * An output CBZ that already exists counts as done only if it validates NOW
+ * against the pages it should hold (`7z t` + image count).  A crash or an
+ * older run can leave a truncated or short file under the right name, and
+ * skipping it as "exists" let the source be marked validated — and offered
+ * for deletion — while its pages were only in that broken file.
+ *
+ * Returns { state: 'valid' }                – counts as done
+ *         { state: 'unreadable' }           – broken; the caller replaces it
+ *         { state: 'mismatch', reason }     – opens, but is not this output;
+ *                                             the caller leaves it alone and
+ *                                             does not count it as done
+ */
+async function checkExistingOutput(cbzPath, expectedImageCount, signal) {
+  const v = await validateCbz(cbzPath, expectedImageCount, signal);
+  if (v.valid) return { state: 'valid' };
+  if (!(await canOpenCbz(cbzPath))) return { state: 'unreadable' };
+  return { state: 'mismatch', reason: v.reason };
+}
+
+/**
+ * Reserve a unique output path `<dir>/<name><ext>` for THIS conversion — one
+ * top-level archive plus everything nested inside it share one `claims` set.
+ *
+ * Different sources can map to the same output: loose pages in "Vol" pack to
+ * "Vol/Vol.cbz", exactly where the subfolder "Vol/Vol" packs; a nested
+ * "X.zip" and a folder "X" both want "X.cbz"; generic group names collapse to
+ * one "#001".  The second one then hit the skip-if-exists branch as "already
+ * converted" and its pages were never packed.  A path already claimed in this
+ * run gets " (n)" appended, Windows-style.  Only this run's claims are
+ * consulted (never the disk), so a re-run assigns every source the same name
+ * again and skip-if-exists stays a genuine cross-run "already converted".
+ */
+function claimOutputPath(claims, dir, name, ext = '.cbz') {
+  const keyOf = (p) => path.resolve(p).toLowerCase(); // Windows names are case-insensitive
+  let candidate = path.join(dir, name + ext);
+  for (let n = 1; claims.has(keyOf(candidate)); n++) candidate = path.join(dir, `${name} (${n})${ext}`);
+  claims.add(keyOf(candidate));
+  return candidate;
+}
+
 // ─── Extraction ─────────────────────────────────────────────────────────────
 
 /**
@@ -146,7 +187,7 @@ async function extractArchive(srcFile, destDir, signal) {
     const root     = path.resolve(destDir);
     const crcPaths = crcNames.map((name) => path.resolve(root, name));
     if (crcPaths.some((full) => !isInsideDir(root, full))) {
-      throw new Error('Unsafe file path inside archive — not converted');
+      throw new Error('Unsafe file path inside archive');
     }
 
     // Delete the bad extracts so they don't end up in the output CBZ.
@@ -580,8 +621,18 @@ function isComplexStructure(dir) {
  *   Leaf image dir → pack all images to outDir/<folderName>.cbz
  *   Non-leaf dir   → mkdir outDir/<name>, recurse
  *   Loose images   → pack to outDir/<path.basename(outDir)>.cbz
+ *
+ * `tree` is shared by every level of ONE archive's tree:
+ *   claims     – output paths claimed this run (see claimOutputPath); the
+ *                same Set is handed to nested archives
+ *   pagesDone  – images of this tree now in a CBZ that validated this run
+ *                (freshly packed, or an existing one that re-validated)
+ *   failures   – nested archives that were not converted and validated
+ * processFile compares pagesDone with the tree's image count and fails the
+ * archive on any shortfall or nested failure.
  */
-async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIfPaused = null) {
+async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIfPaused = null, tree = null) {
+  tree ??= { claims: new Set(), pagesDone: 0, failures: [] };
   let entries;
   try { entries = fs.readdirSync(srcDir, { withFileTypes: true }); } catch { return []; }
 
@@ -603,18 +654,15 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
     const ext  = path.extname(archive).toLowerCase();
     const base = path.basename(archive);
     if (ext === '.cbz') {
-      const dst = path.join(outDir, base);
-      if (fs.existsSync(dst)) {
-        log(`  SKIP (exists): ${base}`, 'skip');
-      } else {
-        await fs.promises.copyFile(archive, dst);
-        log(`  Copied: ${base}`, 'success');
-        outputs.push(dst);
-      }
+      const copied = await copyNestedCbz(archive, outDir, log, signal, tree);
+      if (copied) outputs.push(copied);
     } else {
       log(`  Converting: ${base}`, 'info');
-      const result = await processFile(archive, isManga, log, signal, outDir, waitIfPaused);
+      const result = await processFile(archive, isManga, log, signal, outDir, waitIfPaused, tree.claims);
       if (result.success && result.outputs) outputs.push(...result.outputs);
+      // A nested archive that did not convert and validate fails the bundle:
+      // the bundle is the only other copy of its pages.
+      if (!result.success) tree.failures.push(base);
     }
   }
 
@@ -635,63 +683,131 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
 
     if (!subHasSubdirs && !subHasArchives && subImages.length > 0) {
       // Leaf image folder → pack to CBZ at this output level
-      const cbzPath = path.join(outDir, `${sub.name}.cbz`);
-      if (fs.existsSync(cbzPath) && !(await canOpenCbz(cbzPath))) {
-        log(`  WARN: Existing ${sub.name}.cbz is unreadable — re-converting…`, 'warn');
-        try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
-      }
-      if (fs.existsSync(cbzPath)) {
-        log(`  SKIP (exists): ${sub.name}.cbz`, 'skip');
-      } else {
-        const subXml    = subEntries
-          .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.xml')
-          .map((e) => path.join(subSrc, e.name));
-        const subToPack = [...subImages, ...subXml];
-        log(`  Packing → ${sub.name}.cbz  (${subImages.length} images)`, 'info');
-        const pv = await packAndValidate(subToPack, cbzPath, subImages.length, signal);
-        if (pv.success) {
-          log(`  ✓ Valid: ${sub.name}.cbz`, 'success');
-          outputs.push(cbzPath);
-        } else {
-          log(`  ERROR: ${pv.reason}`, 'error');
-        }
-      }
+      const cbzPath   = claimOutputPath(tree.claims, outDir, sub.name);
+      const subXml    = subEntries
+        .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.xml')
+        .map((e) => path.join(subSrc, e.name));
+      const packed = await packTreeOutput([...subImages, ...subXml], subImages.length, cbzPath, 'Packing', log, signal, tree);
+      if (packed) outputs.push(packed);
     } else {
       // Intermediate folder — create matching output subdir and recurse
       const subOut = path.join(outDir, sub.name);
       fs.mkdirSync(subOut, { recursive: true });
-      const subOutputs = await processDirectoryTree(subSrc, subOut, isManga, log, signal, waitIfPaused);
+      const subOutputs = await processDirectoryTree(subSrc, subOut, isManga, log, signal, waitIfPaused, tree);
       outputs.push(...subOutputs);
     }
   }
 
   // ── Loose images alongside subdirs or archives ──────────────────────────
   if (images.length > 0) {
-    const looseName  = path.basename(outDir);
-    const cbzPath    = path.join(outDir, `${looseName}.cbz`);
-    if (fs.existsSync(cbzPath) && !(await canOpenCbz(cbzPath))) {
-      log(`  WARN: Existing ${looseName}.cbz is unreadable — re-converting…`, 'warn');
-      try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
-    }
-    if (fs.existsSync(cbzPath)) {
-      log(`  SKIP (exists): ${looseName}.cbz`, 'skip');
-    } else {
-      const looseXml  = entries
-        .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.xml')
-        .map((e) => path.join(srcDir, e.name));
-      const toPack = [...images, ...looseXml];
-      log(`  Packing loose images → ${looseName}.cbz  (${images.length} images)`, 'info');
-      const pv = await packAndValidate(toPack, cbzPath, images.length, signal);
-      if (pv.success) {
-        log(`  ✓ Valid: ${looseName}.cbz`, 'success');
-        outputs.push(cbzPath);
-      } else {
-        log(`  ERROR: ${pv.reason}`, 'error');
-      }
-    }
+    const cbzPath  = claimOutputPath(tree.claims, outDir, path.basename(outDir));
+    const looseXml = entries
+      .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.xml')
+      .map((e) => path.join(srcDir, e.name));
+    const packed = await packTreeOutput([...images, ...looseXml], images.length, cbzPath, 'Packing loose images', log, signal, tree);
+    if (packed) outputs.push(packed);
   }
 
   return outputs;
+}
+
+/**
+ * Pack one tree-level output of processDirectoryTree (a leaf folder, or one
+ * level's loose images) to `cbzPath`.  An existing file there counts as done
+ * only if it validates now (checkExistingOutput); an unreadable one is
+ * replaced; one that opens but doesn't match is left alone and not counted.
+ * Adds the pages to tree.pagesDone once they are in a validated CBZ.
+ * Returns cbzPath when a new CBZ was written, else null.
+ */
+async function packTreeOutput(files, imageCount, cbzPath, packLabel, log, signal, tree) {
+  const name = path.basename(cbzPath);
+  if (fs.existsSync(cbzPath)) {
+    const existing = await checkExistingOutput(cbzPath, imageCount, signal);
+    if (existing.state === 'valid') {
+      log(`  SKIP (exists): ${name}`, 'skip');
+      tree.pagesDone += imageCount;
+      return null;
+    }
+    if (existing.state === 'mismatch') {
+      log(`  ERROR: Existing ${name} failed validation — ${existing.reason}`, 'error');
+      return null;
+    }
+    log(`  WARN: Existing ${name} is unreadable — re-converting…`, 'warn');
+    try { fs.unlinkSync(cbzPath); } catch { /* ignore */ }
+    if (fs.existsSync(cbzPath)) {             // could not be removed (locked, or a folder)
+      log(`  SKIP (exists): ${name}`, 'skip');
+      return null;
+    }
+  }
+  log(`  ${packLabel} → ${name}  (${imageCount} images)`, 'info');
+  const pv = await packAndValidate(files, cbzPath, imageCount, signal);
+  if (!pv.success) {
+    log(`  ERROR: ${pv.reason}`, 'error');
+    return null;
+  }
+  log(`  ✓ Valid: ${name}`, 'success');
+  tree.pagesDone += imageCount;
+  return cbzPath;
+}
+
+/**
+ * Copy a nested .cbz found in an archive's tree into `outDir`, under a name
+ * claimed for this run.  The copy goes to `<dst>.tmp`, is validated, and only
+ * then renamed into place — so a crash mid-copy leaves an ignored `.cbz.tmp`,
+ * never a truncated `.cbz`.  An existing file at `dst` counts as done only if
+ * it validates now: the old copy-if-absent skipped a truncated copy from an
+ * earlier crash as "exists" forever, and the bundle still validated.
+ *
+ * Records the nested CBZ in tree.failures when it ends up without a validated
+ * copy.  Returns dst when a new copy was written, else null.
+ */
+async function copyNestedCbz(archive, outDir, log, signal, tree) {
+  const base = path.basename(archive);
+  const ext  = path.extname(archive);
+  const dst  = claimOutputPath(tree.claims, outDir, path.basename(archive, ext), ext);
+  const name = path.basename(dst);
+  const fail = (msg) => { log(`  ERROR: ${msg}`, 'error'); tree.failures.push(base); return null; };
+
+  let expected;
+  try {
+    expected = await countImageEntries(archive, signal);
+  } catch (err) {
+    if (err.name === 'AbortError' || signal?.aborted) throw err;
+    return fail('Cannot list archive contents');
+  }
+
+  if (fs.existsSync(dst)) {
+    const existing = await checkExistingOutput(dst, expected, signal);
+    if (existing.state === 'valid') {
+      log(`  SKIP (exists): ${name}`, 'skip');
+      return null;
+    }
+    if (existing.state === 'mismatch') return fail(`Existing ${name} failed validation — ${existing.reason}`);
+    log(`  WARN: Existing ${name} is unreadable — re-converting…`, 'warn');
+    try { fs.unlinkSync(dst); } catch { /* ignore */ }
+    if (fs.existsSync(dst)) {                 // could not be removed (locked, or a folder)
+      log(`  SKIP (exists): ${name}`, 'skip');
+      tree.failures.push(base);
+      return null;
+    }
+  }
+
+  const tmp = dst + '.tmp';
+  try { fs.unlinkSync(tmp); } catch { /* ignore — may not exist */ }
+  try {
+    await fs.promises.copyFile(archive, tmp);
+    const v = await validateCbz(tmp, expected, signal);
+    if (!v.valid) {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+      return fail(v.reason);
+    }
+    await fs.promises.rename(tmp, dst);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    throw err;
+  }
+  log(`  Copied: ${name}`, 'success');
+  return dst;
 }
 
 // ─── Packing ────────────────────────────────────────────────────────────────
@@ -781,7 +897,10 @@ async function packAndValidate(files, outputPath, expectedImageCount, signal) {
 // ─── Core per-file processor ─────────────────────────────────────────────────
 
 // outputDir is used when processing nested archives so outputs land next to the outer archive.
-async function processFile(srcFile, isManga, log, signal, outputDir = null, waitIfPaused = null) {
+// claims (see claimOutputPath) is passed in for a nested archive so it shares
+// its outer archive's claimed output names; a top-level call starts a new set.
+async function processFile(srcFile, isManga, log, signal, outputDir = null, waitIfPaused = null, claims = null) {
+  claims ??= new Set();
   const ext    = path.extname(srcFile).toLowerCase();
   const srcDir = path.dirname(srcFile);
   const outDir = outputDir ?? srcDir;
@@ -881,14 +1000,34 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       const wrapperOutDir = path.join(outDir, baseName);
       fs.mkdirSync(wrapperOutDir, { recursive: true });
       log(`  Hierarchical structure — processing into ${baseName}/`, 'info');
-      const outputs = await processDirectoryTree(contentDir, wrapperOutDir, isManga, log, signal, waitIfPaused);
+      const tree      = { claims, pagesDone: 0, failures: [] };
+      const treePages = deepImages(contentDir).length;
+      const outputs   = await processDirectoryTree(contentDir, wrapperOutDir, isManga, log, signal, waitIfPaused, tree);
       if (outputs.length === 0) {
         log('  WARNING: No output produced from hierarchical archive', 'warn');
         return { success: false, outcome: 'noImages', isPdf, pdfPages };
       }
-      // validated:true — every CBZ inside processDirectoryTree went through
-      // packAndValidate, so an explicit flag lets callers (e.g. the renderer's
-      // single-file flow) gate delete-original on more than just `success`.
+      // The archive only validates when nothing inside it was lost:
+      //   • every nested archive converted and validated — a nested failure
+      //     used to be ignored, so the bundle still validated and was offered
+      //     for deletion while it held the only copy of those pages;
+      //   • every page of the tree is in a CBZ validated this run — a page
+      //     whose pack failed or was skipped used to vanish unnoticed.
+      let reason = null;
+      if (tree.failures.length > 0) {
+        const more = tree.failures.length > 1 ? ` (+${tree.failures.length - 1} more)` : '';
+        reason = `Nested archive not converted: ${tree.failures[0]}${more}`;
+      } else if (tree.pagesDone !== treePages) {
+        reason = `${treePages - tree.pagesDone} of ${treePages} page(s) not in a validated CBZ`;
+      }
+      if (reason) {
+        log(`  ERROR: ${reason}`, 'error');
+        return { success: false, outcome: 'validationFailed', reason, isPdf, pdfPages };
+      }
+      // validated:true — every page and every nested archive went through a
+      // validation this run, so an explicit flag lets callers (e.g. the
+      // renderer's single-file flow) gate delete-original on more than just
+      // `success`.
       return { success: true, validated: true, outcome: 'hierarchical', outputs, folderName: baseName, isPdf, pdfPages };
     }
 
@@ -912,29 +1051,18 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
 
     // 4. Create a CBZ for each group
     const outputs = [];
-    // Output names already assigned to a group of THIS archive (lower-cased —
-    // Windows file names are case-insensitive).
-    const usedNames = new Set();
 
     for (const group of groups) {
       if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
 
       // Several generic subdir names collapse to one output name
       // (buildOutputName maps "Chapter 1", "Part 1", "Issue 1", "001" … all to
-      // "… #001").  The second group then hit the skip-if-exists branch below
-      // as "already converted" — its pages were never packed, yet the archive
-      // still validated and the original became deletable.  Give each group of
-      // this archive its own name by appending " (n)", Windows-style.  Only
-      // names assigned in this run are consulted (never the disk), so a re-run
-      // maps every group to the same name again and the skip branch stays a
-      // genuine cross-run "already converted".
+      // "… #001"), and a nested archive's output can land where a sibling of
+      // it in the outer tree packs.  claimOutputPath gives each its own name
+      // (" (n)") so no group is mistaken for "already converted" below.
       const baseOutputName = buildOutputName(group.name, group.parentName, isManga, group.isSplit);
-      let outputName = baseOutputName;
-      for (let n = 1; usedNames.has(outputName.toLowerCase()); n++) {
-        outputName = `${baseOutputName} (${n})`;
-      }
-      usedNames.add(outputName.toLowerCase());
-      const outputPath = path.join(groupOutDir, outputName + '.cbz');
+      const outputPath = claimOutputPath(claims, groupOutDir, baseOutputName);
+      const outputName = path.basename(outputPath, '.cbz');
 
       if (fs.existsSync(outputPath)) {
         if (await canOpenCbz(outputPath)) {

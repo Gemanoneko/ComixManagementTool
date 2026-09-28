@@ -351,7 +351,7 @@ async function packFolder(sz, folderPath, baseName, parentDir, log, signal) {
       // (An XML-only subfolder has no pages to lose and nothing to count.)
       if (job.imageCount > 0) {
         const v = await validateCbz(targetPath, job.imageCount, signal);
-        if (!v.valid) throw new Error(`Validation failed — ${v.reason}`);
+        if (!v.valid) throw new Error(`Invalid CBZ — ${v.reason}`);
       }
       log(`  Done: ${path.basename(targetPath)}  (${job.entries.length} file(s))`, 'success', parentDir);
       outputPaths.push(targetPath);
