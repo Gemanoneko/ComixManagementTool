@@ -76,7 +76,10 @@ function extractedPath(p) {
  *     the same name twice;
  *   • a file on the path of a folder — "CON" and "con\x.jpg" (both "_con").
  * 7-Zip writes them as one (or fails on the second), so one of them is lost
- * and no exact copy can be made.  Returns [pathA, pathB] or null.
+ * and no exact copy can be made.
+ * Returns { kind, a, b } or null — kind 'twice' (a === b, the same name
+ * twice), 'folder' (a is a file, b a path inside the folder with a's name),
+ * or 'names' (two different names).
  */
 function extractCollision(sourceEntries) {
   const onPath = new Map();   // extracted path (lower) → original path: files and folder entries
@@ -87,21 +90,25 @@ function extractCollision(sourceEntries) {
     if (!x) continue;
     const orig = e.path.replace(/\\+$/, '');
     const k    = x.toLowerCase();
-    if (onPath.has(k)) return [onPath.get(k), orig];
+    if (onPath.has(k)) {
+      const a = onPath.get(k);
+      return { kind: a === orig ? 'twice' : 'names', a, b: orig };
+    }
     onPath.set(k, orig);
     if (!e.isDir) files.set(k, orig);
     for (let i = k.lastIndexOf('\\'); i > 0; i = k.lastIndexOf('\\', i - 1)) {
       if (!inside.has(k.slice(0, i))) inside.set(k.slice(0, i), orig);
     }
   }
-  for (const [k, orig] of files) if (inside.has(k)) return [orig, inside.get(k)];
+  for (const [k, orig] of files) if (inside.has(k)) return { kind: 'folder', a: orig, b: inside.get(k) };
   return null;
 }
 
-/** The failure for a CBZ with an extractCollision. */
-function collisionError([a, b]) {
-  // PLACEHOLDER wording — Judy to check (ruling 23, item 4).
-  const message = `"${a}" and "${b}" get the same name when extracted on Windows, so this CBZ can't be resized.`;
+/** The failure for a CBZ with an extractCollision (Judy's wording). */
+function collisionError({ kind, a, b }) {
+  const message = kind === 'twice'  ? `This CBZ holds "${a}" twice, so it can't be resized.`
+    : kind === 'folder' ? `File "${a}" and the folder holding "${b}" get the same name when extracted on Windows, so this CBZ can't be resized.`
+    : `"${a}" and "${b}" get the same name when extracted on Windows, so this CBZ can't be resized.`;
   return Object.assign(new Error(message), {
     resizeFailure: { message, fix: 'Rename one of them inside the CBZ with an archive tool, then resize it again.' },
   });
