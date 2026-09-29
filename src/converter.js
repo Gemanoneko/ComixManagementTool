@@ -130,7 +130,7 @@ async function canOpenCbz(cbzPath) {
  *                                          pages (resized later, rendered
  *                                          again, or another archive's):
  *                                          the file fails, nothing is
- *                                          written (existingOtherFailure)
+ *                                          written (existingMismatchFailure)
  */
 async function checkExistingOutput(cbzPath, expectedImageCount, files, signal) {
   const v = await validateCbz(cbzPath, expectedImageCount, signal);
@@ -177,22 +177,61 @@ async function checkExistingCopy(dst, archive, expectedImageCount, signal) {
 }
 
 /**
- * Sergei's ruling 24: a CBZ already on disk under an output's name but with
- * different pages (checkExistingOutput 'other') — resized later, rendered
- * again by another ImageMagick, or another archive's ("Foo.zip" and
- * "Foo .zip" both want "Foo.cbz") — fails this file.  Nothing is written,
- * the CBZ is left alone and the original is not offered for deletion.
- * Returns processFile's failure result — the 'existing-mismatch' cause, as
- * for an existing CBZ with another page count (Judy's wording); `pagesDiffer`
- * tells an outer tree it was this case.  Logs it unless `logged` (a nested
- * archive's failure, already logged).
+ * A CBZ already on disk under one of this file's output names that does not
+ * hold its pages fails the file (the 'existing-mismatch' cause), and nothing
+ * of it is written (rulings 24 and 26):
+ *   • another page count, or it fails `7z t` (checkExistingOutput 'mismatch',
+ *     Sergei's fix A): "Existing X.cbz failed validation — <reason>";
+ *   • the same count with other pages (checkExistingOutput 'other' — resized
+ *     later, rendered again by another ImageMagick, or another archive's:
+ *     "Foo.zip" and "Foo .zip" both want "Foo.cbz"): "Existing X.cbz doesn't
+ *     match this file — its pages differ from this file's" (Judy: that CBZ is
+ *     intact, so not "failed validation").
+ * `conflict` = { name, inner, pagesDiffer }.  Returns processFile's failure
+ * result; logs it unless `logged` (a nested archive's, already logged).
  */
-function existingOtherFailure(name, log, extra = {}, logged = false) {
-  const inner  = "its pages differ from this file's";
-  const reason = `Existing ${name} doesn't match this file — ${inner}`;
+const PAGES_DIFFER = "its pages differ from this file's";
+
+function existingMismatchFailure({ name, inner, pagesDiffer }, log, extra = {}, logged = false) {
+  const reason = pagesDiffer
+    ? `Existing ${name} doesn't match this file — ${inner}`
+    : `Existing ${name} failed validation — ${inner}`;
   if (!logged) log(`  ERROR: ${reason}`, 'error');
   return { success: false, outcome: 'validationFailed', reason,
-    failure: { cause: 'existing-mismatch', name, inner, pagesDiffer: true }, ...extra };
+    failure: { cause: 'existing-mismatch', name, inner, pagesDiffer: !!pagesDiffer }, ...extra };
+}
+
+/** checkExistingOutput / checkExistingCopy result → the conflict it is, or null. */
+function conflictOf(name, existing) {
+  if (existing?.state === 'other')    return { name, inner: PAGES_DIFFER, pagesDiffer: true };
+  if (existing?.state === 'mismatch') return { name, inner: existing.reason, pagesDiffer: false };
+  return null;
+}
+
+/** mkdir `dir` if it is not there, noting it in `made` (undoWrites removes it). */
+function makeDir(dir, made) {
+  if (fs.existsSync(dir)) return;
+  fs.mkdirSync(dir, { recursive: true });
+  made?.push(dir);
+}
+
+/**
+ * Ruling 26: a tree archive that fails on an existing-CBZ conflict found only
+ * when a nested archive is reached (its outputs are known only once it is
+ * extracted) must not leave behind what this run already wrote for it.
+ * Deletes `written` (CBZs this run created for the file — never one that was
+ * there before) and then every folder in `dirs` (created this run) that is
+ * empty again, deepest first.  Returns how many CBZs were removed.
+ */
+function undoWrites(written, dirs) {
+  let removed = 0;
+  for (const f of written) {
+    try { fs.unlinkSync(f); removed++; } catch { /* already gone */ }
+  }
+  for (const d of [...dirs].reverse()) {
+    try { fs.rmdirSync(d); } catch { /* not empty, or gone */ }
+  }
+  return removed;
 }
 
 /** `check()` for `outputPath`, once per tree: both passes share tree.checked. */
@@ -722,10 +761,12 @@ function isComplexStructure(dir) {
  *   plan       – true for processFile's first pass (ruling 24): nothing is
  *                written, no folder is made and no nested archive is
  *                converted; every output already on disk is checked
- *   conflict   – { name } of the first output already on disk with different
- *                pages (checkExistingOutput 'other'); once set, nothing more
- *                is written and processFile fails the file
+ *   conflict   – the first output already on disk that doesn't hold this
+ *                file's pages ({ name, inner, pagesDiffer } — conflictOf);
+ *                once set, nothing more is written and processFile fails the
+ *                file
  *   checked    – checkExistingOutput results by path, shared by both passes
+ *   made       – folders this run created (makeDir), for undoWrites
  *   pagesDone  – images of this tree now in a CBZ that validated this run
  *                (freshly packed, or an existing one that re-validated)
  *   failures   – nested archives that were not converted and validated
@@ -764,14 +805,14 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
       // (The first pass skips it: its outputs are only known once it is
       // extracted.  Its own processFile checks them before it writes.)
       log(`  Converting: ${base}`, 'info');
-      const result = await processFile(archive, isManga, log, signal, outDir, waitIfPaused, tree.claims);
+      const result = await processFile(archive, isManga, log, signal, outDir, waitIfPaused, tree.claims, tree.made);
       if (result.success && result.outputs) outputs.push(...result.outputs);
       // A nested archive that did not convert and validate fails the bundle:
       // the bundle is the only other copy of its pages.  One whose outputs
       // all exist and validated this run ('allSkipped', a re-run) is done.
       if (result.outcome === 'allSkipped') tree.skipped++;
       else if (!result.success) tree.failures.push(base);
-      if (result.failure?.pagesDiffer) tree.conflict ??= { name: result.failure.name, logged: true };
+      if (result.failure?.cause === 'existing-mismatch') tree.conflict ??= { ...result.failure, logged: true };
     }
   }
 
@@ -803,7 +844,7 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
       // safeFolderName: no trailing space/period, no device name (7-Zip
       // already writes a trailing space or period as "_" when it extracts).
       const subOut = path.join(outDir, safeFolderName(sub.name));
-      if (!tree.plan) fs.mkdirSync(subOut, { recursive: true });
+      if (!tree.plan) makeDir(subOut, tree.made);
       const subOutputs = await processDirectoryTree(subSrc, subOut, isManga, log, signal, waitIfPaused, tree);
       outputs.push(...subOutputs);
     }
@@ -826,9 +867,9 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
  * level's loose images) to `<outDir>/<outName>.cbz`.  An existing file counts
  * as done only if it holds exactly these pages now (checkExistingOutput); an
  * unreadable one is replaced; one that opens but doesn't validate is left
- * alone and not counted; one with different pages is left alone and sets
- * tree.conflict (ruling 24: the file fails).  The first pass (tree.plan) only
- * checks.
+ * one that doesn't hold these pages (another count, or other pages) is left
+ * alone and sets tree.conflict (rulings 24, 26: the file fails).  The first
+ * pass (tree.plan) only checks.
  * Adds the pages to tree.pagesDone once they are in a validated CBZ.
  * Returns the CBZ path when a new CBZ was written, else null.
  */
@@ -838,17 +879,14 @@ async function packTreeOutput(files, imageCount, outDir, outName, packLabel, log
   const existing = fs.existsSync(cbzPath)
     ? await checkOnce(tree, cbzPath, () => checkExistingOutput(cbzPath, imageCount, files, signal))
     : null;
-  if (existing?.state === 'other') { tree.conflict ??= { name }; return null; }
+  const conflict = conflictOf(name, existing);
+  if (conflict) { tree.conflict ??= conflict; return null; }
   if (tree.plan) return null;
   if (existing) {
     if (existing.state === 'valid') {
       log(`  SKIP (exists): ${name}`, 'skip');
       tree.pagesDone += imageCount;
       tree.skipped++;
-      return null;
-    }
-    if (existing.state === 'mismatch') {
-      log(`  ERROR: Existing ${name} failed validation — ${existing.reason}`, 'error');
       return null;
     }
     log(`  WARN: Existing ${name} is unreadable — re-converting…`, 'warn');
@@ -877,9 +915,9 @@ async function packTreeOutput(files, imageCount, outDir, outName, packLabel, log
  * it validates now: the old copy-if-absent skipped a truncated copy from an
  * earlier crash as "exists" forever, and the bundle still validated.
  *
- * A copy already there with different entries (checkExistingCopy 'other') is
- * left alone and sets tree.conflict (ruling 24: the file fails).  The first
- * pass (tree.plan) only checks.
+ * A copy already there that isn't this one (another count, or other entries)
+ * is left alone and sets tree.conflict (rulings 24, 26: the file fails).  The
+ * first pass (tree.plan) only checks.
  *
  * Records the nested CBZ in tree.failures when it ends up without a validated
  * copy.  Returns dst when a new copy was written, else null.
@@ -899,7 +937,8 @@ async function copyNestedCbz(archive, outDir, log, signal, tree) {
     if (err.name === 'AbortError' || signal?.aborted) throw err;
     return fail(`Cannot list contents of ${base}`);
   }
-  if (existing?.state === 'other') { tree.conflict ??= { name }; return null; }
+  const conflict = conflictOf(name, existing);
+  if (conflict) { tree.conflict ??= conflict; return null; }
   if (tree.plan) return null;
 
   if (existing) {
@@ -908,7 +947,6 @@ async function copyNestedCbz(archive, outDir, log, signal, tree) {
       tree.skipped++;
       return null;
     }
-    if (existing.state === 'mismatch') return fail(`Existing ${name} failed validation — ${existing.reason}`);
     log(`  WARN: Existing ${name} is unreadable — re-copying…`, 'warn');
     try { fs.unlinkSync(dst); } catch { /* ignore */ }
     if (fs.existsSync(dst)) {                 // could not be removed (locked, or a folder)
@@ -1032,8 +1070,12 @@ async function packAndValidate(files, outputPath, expectedImageCount, signal) {
 // outputDir is used when processing nested archives so outputs land next to the outer archive.
 // claims (see claimOutputPath) is passed in for a nested archive so it shares
 // its outer archive's claimed output names; a top-level call starts a new set.
-async function processFile(srcFile, isManga, log, signal, outputDir = null, waitIfPaused = null, claims = null) {
+// made (see makeDir) is passed in for a nested archive too, so the outer
+// archive's undoWrites also removes folders the nested one created.
+async function processFile(srcFile, isManga, log, signal, outputDir = null, waitIfPaused = null, claims = null, made = null) {
   claims ??= new Set();
+  made   ??= [];
+  const madeFrom = made.length;                 // folders from here on are this call's
   const ext    = path.extname(srcFile).toLowerCase();
   const srcDir = path.dirname(srcFile);
   const outDir = outputDir ?? srcDir;
@@ -1139,21 +1181,30 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       // A folder of that name that is already there is used as it is, as for
       // any other archive; the CBZ names inside are claimed per run.
       const wrapperOutDir = path.join(outDir, safeFolderName(baseName));
-      // Ruling 24: a first pass writes nothing and checks every output that
-      // is already on disk; one with different pages fails the file before
-      // anything is written.  (A nested archive's own outputs are known only
-      // once it is extracted: they are checked when it is reached, and
-      // nothing more is written after one fails that way.)
+      // Rulings 24, 26: a first pass writes nothing and checks every output
+      // that is already on disk; one that doesn't hold this file's pages
+      // (another count, or other pages) fails the file before anything is
+      // written.  A nested archive's own outputs are known only once it is
+      // extracted, so they are checked when it is reached; when one fails
+      // that way, nothing more is written and what this run already wrote
+      // for the file is removed again (undoWrites) — cheaper than
+      // extracting every nested archive twice on every run.
       const checked  = new Map();
-      const planTree = { claims: new Set(claims), pagesDone: 0, failures: [], skipped: 0, plan: true, conflict: null, checked };
+      const planTree = { claims: new Set(claims), pagesDone: 0, failures: [], skipped: 0, plan: true, conflict: null, checked, made: null };
       await processDirectoryTree(contentDir, wrapperOutDir, isManga, log, signal, waitIfPaused, planTree);
-      if (planTree.conflict) return existingOtherFailure(planTree.conflict.name, log, { isPdf, pdfPages });
-      fs.mkdirSync(wrapperOutDir, { recursive: true });
+      if (planTree.conflict) return existingMismatchFailure(planTree.conflict, log, { isPdf, pdfPages });
+      makeDir(wrapperOutDir, made);
       log(`  Hierarchical structure — processing into ${path.basename(wrapperOutDir)}/`, 'info');
-      const tree      = { claims, pagesDone: 0, failures: [], skipped: 0, plan: false, conflict: null, checked };
+      const tree      = { claims, pagesDone: 0, failures: [], skipped: 0, plan: false, conflict: null, checked, made };
       const treePages = deepImages(contentDir).length;
       const outputs   = await processDirectoryTree(contentDir, wrapperOutDir, isManga, log, signal, waitIfPaused, tree);
-      if (tree.conflict) return existingOtherFailure(tree.conflict.name, log, { isPdf, pdfPages }, tree.conflict.logged);
+      if (tree.conflict) {
+        const failure = existingMismatchFailure(tree.conflict, log, { isPdf, pdfPages }, tree.conflict.logged);
+        const removed = undoWrites(outputs, made.slice(madeFrom));
+        // PLACEHOLDER wording — Judy to check (ruling 26).
+        if (removed > 0) log(`  Removed ${removed} ${removed === 1 ? 'CBZ' : 'CBZs'} this run had written for this file.`, 'warn');
+        return failure;
+      }
       // The archive only validates when nothing inside it was lost:
       //   • every nested archive converted and validated — a nested failure
       //     used to be ignored, so the bundle still validated and was offered
@@ -1214,8 +1265,9 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
     //    "001" … all to "… #001"), and a nested archive's output can land
     //    where a sibling of it in the outer tree packs.  claimOutputPath gives
     //    each its own name (" (n)") so no group is mistaken for "already
-    //    converted" below.  Ruling 24: a CBZ already there with this name but
-    //    different pages fails the file here, with nothing written.
+    //    converted" below.  Rulings 24, 26: a CBZ already there with this
+    //    name that doesn't hold these pages (another count, or other pages)
+    //    fails the file here, with nothing written.
     const planned = [];
     for (const group of groups) {
       if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
@@ -1225,12 +1277,13 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       const existing   = fs.existsSync(outputPath)
         ? await checkExistingOutput(outputPath, imageCount, group.files, signal)
         : null;
-      if (existing?.state === 'other') return existingOtherFailure(path.basename(outputPath), log, { isPdf, pdfPages });
+      const conflict   = conflictOf(path.basename(outputPath), existing);
+      if (conflict) return existingMismatchFailure(conflict, log, { isPdf, pdfPages });
       planned.push({ group, outputPath, imageCount, existing });
     }
 
     if (groups.length > 1) {
-      fs.mkdirSync(groupOutDir, { recursive: true });
+      makeDir(groupOutDir, made);
       log(`  Split into ${groups.length} archives → ${path.basename(groupOutDir)}\\`, 'info');
     }
 
@@ -1249,17 +1302,12 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       // the pages missing from that CBZ existed only in the original.
       //   valid      → skip; it counts as done
       //   unreadable → replace it
-      //   mismatch   → leave it untouched and fail the archive
+      //   mismatch / other pages → the file already failed above, before
+      //                anything was written (rulings 24, 26)
       if (existing) {
         if (existing.state === 'valid') {
           log(`  SKIP (exists): ${outputName}.cbz`, 'skip');
           continue;
-        }
-        if (existing.state === 'mismatch') {
-          const reason = `Existing ${outputName}.cbz failed validation — ${existing.reason}`;
-          log(`  ERROR: ${reason}`, 'error');
-          return { success: false, outcome: 'validationFailed', reason, isPdf, pdfPages,
-            failure: { cause: 'existing-mismatch', name: `${outputName}.cbz`, inner: existing.reason } };
         }
         log(`  WARN: Existing ${outputName}.cbz is unreadable — re-converting…`, 'warn');
         try { fs.unlinkSync(outputPath); } catch { /* ignore */ }
@@ -1401,6 +1449,29 @@ async function findOrphanedOriginals(rootDir) {
 
 // ─── Conversion summary ──────────────────────────────────────────────────────
 
+/**
+ * The Conversion Summary text for a file that failed validation — Judy's
+ * wording by failure cause (ruling 26), after "  ✗  <rel>  →  ".  An unknown
+ * cause keeps the old "validation failed — <reason>".
+ */
+function validationFailedText(result) {
+  const f = result.failure || {};
+  const pages = (n) => `${n} ${n === 1 ? 'page' : 'pages'}`;
+  switch (f.cause) {
+    // both kinds: inner is "its pages differ from this file's" or the check that failed
+    case 'existing-mismatch':  return `existing ${f.name} doesn't match this file — ${f.inner}`;
+    case 'nested-failed':      return `${f.nested} inside it didn't convert or validate${f.more > 0 ? ` (+${f.more} more)` : ''}`;
+    // the noun agrees with the total, the verb with the lost count
+    case 'pages-lost':         return `${f.lost} of ${f.total} ${f.total === 1 ? 'page' : 'pages'} ${f.lost === 1 ? "isn't" : "aren't"} in a validated CBZ`;
+    case 'cbz-count-mismatch': return `validation failed — ${f.name} has ${pages(f.found)}, expected ${f.expected}`;
+    case 'cbz-integrity':      return `validation failed — ${f.name} is corrupt`;
+    case 'cbz-no-images':      return `validation failed — ${f.name} has no pages`;
+    case 'cbz-unlistable':     return `validation failed — couldn't read back ${f.name}`;
+    case 'cbz-7zip-missing':   return 'validation failed — 7-Zip is missing from this install';
+    default:                   return `validation failed — ${result.reason}`;
+  }
+}
+
 function logSummary(outcomes, rootFolder, log) {
   if (outcomes.length === 0) return;
   log('\n── Conversion Summary ───────────────────────────────────', 'header');
@@ -1434,7 +1505,7 @@ function logSummary(outcomes, rootFolder, log) {
         log(`  →  ${rel}  →  skipped (CBZ already exists)`, 'skip');
         break;
       case 'validationFailed':
-        log(`  ✗  ${rel}  →  validation failed — ${reason}`, 'error');
+        log(`  ✗  ${rel}  →  ${validationFailedText(result)}`, 'error');
         break;
       case 'noImages':
         log(`  ✗  ${rel}  →  no images found`, 'error');
@@ -1485,9 +1556,10 @@ function describeConvertFailure(o) {
     // inner "its pages differ from this file's".  One Fix line (Judy).
     case 'existing-mismatch':  return { message: `An existing "${f.name}" doesn't match this file — ${f.inner}.`,
       fix: `Move or rename the existing "${f.name}", then convert again.` };
-    case 'nested-failed':      return { message: `"${f.nested}" inside this file didn't convert or validate.${f.more > 0 ? ` (+${f.more} more)` : ''}`,
+    case 'nested-failed':      return { message: `"${f.nested}" inside this file didn't convert or validate${f.more > 0 ? ` (+${f.more} more)` : ''}.`,
       fix: `Convert this file again — if it keeps failing, convert "${f.nested}" on its own to see the detailed error.` };
-    case 'pages-lost':         return { message: `${f.lost} of ${f.total} ${f.lost === 1 ? "page isn't" : "pages aren't"} in a validated CBZ.`,
+    // the noun agrees with the total, the verb with the lost count (Judy)
+    case 'pages-lost':         return { message: `${f.lost} of ${f.total} ${f.total === 1 ? 'page' : 'pages'} ${f.lost === 1 ? "isn't" : "aren't"} in a validated CBZ.`,
       fix: 'Convert this file again.' };
     default:                   return { message: o.result?.reason || f.detail || 'Conversion failed.',
       fix: 'Convert it again — if it keeps failing, the file itself may be corrupt.' };
