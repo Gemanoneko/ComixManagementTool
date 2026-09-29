@@ -4,7 +4,8 @@ const os = require('os');
 const { execFilePromise } = require('./exec');
 const { sevenZipArgs, listFileContent, longPath, errorLine } = require('./seven-zip');
 const { scanForFiles } = require('./scanner');
-const { validateCbz, countImageEntries } = require('./validator');
+const { validateCbz, countImageEntries, listEntries, compareEntries } = require('./validator');
+const { crc32File } = require('./crc32');
 const { buildOutputName } = require('./renamer');
 const { getSevenZip, getImageMagick } = require('./tools');
 const { tempRoot } = require('./temp');
@@ -106,22 +107,96 @@ async function canOpenCbz(cbzPath) {
 
 /**
  * An output CBZ that already exists counts as done only if it validates NOW
- * against the pages it should hold (`7z t` + image count).  A crash or an
- * older run can leave a truncated or short file under the right name, and
- * skipping it as "exists" let the source be marked validated — and offered
- * for deletion — while its pages were only in that broken file.
+ * against the pages it should hold: `7z t` + image count, then the pages
+ * themselves (holdsThesePages: every page's size and CRC).
+ *   • A crash or an older run can leave a truncated or short file under the
+ *     right name; skipping it as "exists" let the source be marked validated
+ *     — and offered for deletion — while its pages were only in that file.
+ *   • Another archive can own the name: "Foo.zip" and "Foo .zip" both want
+ *     "Foo.cbz".  With the same page count, the count alone passed the other
+ *     archive's CBZ as this one's, and this original was offered for
+ *     deletion while its pages were in no CBZ at all.
  *
- * Returns { state: 'valid' }                – counts as done
- *         { state: 'unreadable' }           – broken; the caller replaces it
- *         { state: 'mismatch', reason }     – opens, but is not this output;
- *                                             the caller leaves it alone and
- *                                             does not count it as done
+ * `files` – what the output should hold (paths on disk); its images are the
+ *           pages compared.
+ *
+ * Returns { state: 'valid' }             – holds exactly these pages; done
+ *         { state: 'unreadable' }        – broken; the caller replaces it
+ *         { state: 'mismatch', reason }  – opens, but fails `7z t` or has
+ *                                          another page count; the caller
+ *                                          leaves it alone and does not
+ *                                          count it as done
+ *         { state: 'other' }             – intact, same page count, other
+ *                                          pages: another file's output; it
+ *                                          is left alone and the next name
+ *                                          is used (claimOwnOutput)
  */
-async function checkExistingOutput(cbzPath, expectedImageCount, signal) {
+async function checkExistingOutput(cbzPath, expectedImageCount, files, signal) {
   const v = await validateCbz(cbzPath, expectedImageCount, signal);
-  if (v.valid) return { state: 'valid' };
-  if (!(await canOpenCbz(cbzPath))) return { state: 'unreadable' };
-  return { state: 'mismatch', reason: v.reason };
+  if (!v.valid) {
+    if (!(await canOpenCbz(cbzPath))) return { state: 'unreadable' };
+    return { state: 'mismatch', reason: v.reason };
+  }
+  return (await holdsThesePages(cbzPath, files, signal)) ? { state: 'valid' } : { state: 'other' };
+}
+
+/**
+ * True when the image entries of `cbzPath` are exactly the images among
+ * `files`: the same sizes and CRCs, counted as a multiset.  Names are not
+ * compared — a CBZ stores its pages flat under their own names, and two
+ * archives' pages are usually both "001.jpg", "002.jpg" …
+ */
+async function holdsThesePages(cbzPath, files, signal) {
+  const isImage = (p) => IMAGE_EXTS.has(path.extname(p).toLowerCase());
+  const have = (await listEntries(longPath(cbzPath), signal))
+    .filter((e) => !e.isDir && isImage(e.path))
+    .map((e) => `${e.size}:${e.crc}`)
+    .sort();
+  const want = [];
+  for (const f of files.filter(isImage)) {
+    want.push(`${(await fs.promises.stat(f)).size}:${await crc32File(f, signal)}`);
+  }
+  want.sort();
+  return have.length === want.length && have.every((k, i) => k === want[i]);
+}
+
+/**
+ * checkExistingOutput for a nested .cbz that is copied as it is: the copy
+ * already at `dst` must hold the same entries as `archive` (paths, sizes and
+ * CRCs — compareEntries).
+ */
+async function checkExistingCopy(dst, archive, expectedImageCount, signal) {
+  const v = await validateCbz(dst, expectedImageCount, signal);
+  if (!v.valid) {
+    if (!(await canOpenCbz(dst))) return { state: 'unreadable' };
+    return { state: 'mismatch', reason: v.reason };
+  }
+  const same = compareEntries(await listEntries(longPath(archive), signal), await listEntries(longPath(dst), signal), []);
+  return same.valid ? { state: 'valid' } : { state: 'other' };
+}
+
+/**
+ * Claim this conversion's path for an output that wants `<dir>/<name><ext>`
+ * (claimOutputPath) and check the file already there, if any, with `check`.
+ * A file that holds OTHER pages (state 'other' — another archive's output) is
+ * left alone and the next " (n)" name is claimed, until a name is free or
+ * holds this file's own output.  So "Foo.zip" and "Foo .zip" each get their
+ * own CBZ ("Foo.cbz", "Foo (1).cbz") even in a folder they share, and a
+ * re-run walks the same names, finds its own output and skips it.
+ *
+ * Returns { outputPath, existing }: existing is null when nothing is at
+ * outputPath, else check's result ('valid' | 'unreadable' | 'mismatch').
+ */
+async function claimOwnOutput(claims, dir, name, ext, check, log) {
+  let taken = null;
+  for (;;) {
+    const outputPath = claimOutputPath(claims, dir, name, ext);
+    const existing   = fs.existsSync(outputPath) ? await check(outputPath) : null;
+    if (existing?.state === 'other') { taken ??= path.basename(outputPath); continue; }
+    // PLACEHOLDER wording — Judy to check (ruling 23).
+    if (taken) log(`  Note: "${taken}" holds other pages — using "${path.basename(outputPath)}"`, 'warn');
+    return { outputPath, existing };
+  }
 }
 
 /**
@@ -702,11 +777,10 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
 
     if (!subHasSubdirs && !subHasArchives && subImages.length > 0) {
       // Leaf image folder → pack to CBZ at this output level
-      const cbzPath   = claimOutputPath(tree.claims, outDir, sub.name);
       const subXml    = subEntries
         .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.xml')
         .map((e) => path.join(subSrc, e.name));
-      const packed = await packTreeOutput([...subImages, ...subXml], subImages.length, cbzPath, 'Packing', log, signal, tree);
+      const packed = await packTreeOutput([...subImages, ...subXml], subImages.length, outDir, sub.name, 'Packing', log, signal, tree);
       if (packed) outputs.push(packed);
     } else {
       // Intermediate folder — create matching output subdir and recurse.
@@ -721,11 +795,10 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
 
   // ── Loose images alongside subdirs or archives ──────────────────────────
   if (images.length > 0) {
-    const cbzPath  = claimOutputPath(tree.claims, outDir, path.basename(outDir));
     const looseXml = entries
       .filter((e) => e.isFile() && path.extname(e.name).toLowerCase() === '.xml')
       .map((e) => path.join(srcDir, e.name));
-    const packed = await packTreeOutput([...images, ...looseXml], images.length, cbzPath, 'Packing loose images', log, signal, tree);
+    const packed = await packTreeOutput([...images, ...looseXml], images.length, outDir, path.basename(outDir), 'Packing loose images', log, signal, tree);
     if (packed) outputs.push(packed);
   }
 
@@ -734,16 +807,19 @@ async function processDirectoryTree(srcDir, outDir, isManga, log, signal, waitIf
 
 /**
  * Pack one tree-level output of processDirectoryTree (a leaf folder, or one
- * level's loose images) to `cbzPath`.  An existing file there counts as done
- * only if it validates now (checkExistingOutput); an unreadable one is
- * replaced; one that opens but doesn't match is left alone and not counted.
+ * level's loose images) to `<outDir>/<outName>.cbz` — or the next " (n)" name
+ * when that file holds another archive's pages (claimOwnOutput).  An existing
+ * file counts as done only if it holds exactly these pages now
+ * (checkExistingOutput); an unreadable one is replaced; one that opens but
+ * doesn't validate is left alone and not counted.
  * Adds the pages to tree.pagesDone once they are in a validated CBZ.
- * Returns cbzPath when a new CBZ was written, else null.
+ * Returns the CBZ path when a new CBZ was written, else null.
  */
-async function packTreeOutput(files, imageCount, cbzPath, packLabel, log, signal, tree) {
+async function packTreeOutput(files, imageCount, outDir, outName, packLabel, log, signal, tree) {
+  const { outputPath: cbzPath, existing } = await claimOwnOutput(tree.claims, outDir, outName, '.cbz',
+    (p) => checkExistingOutput(p, imageCount, files, signal), log);
   const name = path.basename(cbzPath);
-  if (fs.existsSync(cbzPath)) {
-    const existing = await checkExistingOutput(cbzPath, imageCount, signal);
+  if (existing) {
     if (existing.state === 'valid') {
       log(`  SKIP (exists): ${name}`, 'skip');
       tree.pagesDone += imageCount;
@@ -786,8 +862,6 @@ async function packTreeOutput(files, imageCount, cbzPath, packLabel, log, signal
 async function copyNestedCbz(archive, outDir, log, signal, tree) {
   const base = path.basename(archive);
   const ext  = path.extname(archive);
-  const dst  = claimOutputPath(tree.claims, outDir, path.basename(archive, ext), ext);
-  const name = path.basename(dst);
   const fail = (msg) => { log(`  ERROR: ${msg}`, 'error'); tree.failures.push(base); return null; };
 
   let expected;
@@ -798,8 +872,19 @@ async function copyNestedCbz(archive, outDir, log, signal, tree) {
     return fail(`Cannot list contents of ${base}`);
   }
 
-  if (fs.existsSync(dst)) {
-    const existing = await checkExistingOutput(dst, expected, signal);
+  // A copy already there that is another archive's (checkExistingCopy
+  // 'other') is left alone and the next " (n)" name is used.
+  let dst, existing;
+  try {
+    ({ outputPath: dst, existing } = await claimOwnOutput(tree.claims, outDir, path.basename(archive, ext), ext,
+      (p) => checkExistingCopy(p, archive, expected, signal), log));
+  } catch (err) {
+    if (err.name === 'AbortError' || signal?.aborted) throw err;
+    return fail(`Cannot list contents of ${base}`);
+  }
+  const name = path.basename(dst);
+
+  if (existing) {
     if (existing.state === 'valid') {
       log(`  SKIP (exists): ${name}`, 'skip');
       tree.skipped++;
@@ -1109,10 +1194,13 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       // "… #001"), and a nested archive's output can land where a sibling of
       // it in the outer tree packs.  claimOutputPath gives each its own name
       // (" (n)") so no group is mistaken for "already converted" below.
+      // An existing file that holds another archive's pages is left alone
+      // and the next " (n)" name is used (claimOwnOutput).
       const baseOutputName = buildOutputName(group.name, group.parentName, isManga, group.isSplit);
-      const outputPath = claimOutputPath(claims, groupOutDir, baseOutputName);
-      const outputName = path.basename(outputPath, '.cbz');
       const imageCount = group.imageCount ?? group.files.length;
+      const { outputPath, existing } = await claimOwnOutput(claims, groupOutDir, baseOutputName, '.cbz',
+        (p) => checkExistingOutput(p, imageCount, group.files, signal), log);
+      const outputName = path.basename(outputPath, '.cbz');
 
       // An existing output counts as done only if it validates now against
       // this group's pages (checkExistingOutput) — the same rule as the
@@ -1123,8 +1211,7 @@ async function processFile(srcFile, isManga, log, signal, outputDir = null, wait
       //   valid      → skip; it counts as done
       //   unreadable → replace it
       //   mismatch   → leave it untouched and fail the archive
-      if (fs.existsSync(outputPath)) {
-        const existing = await checkExistingOutput(outputPath, imageCount, signal);
+      if (existing) {
         if (existing.state === 'valid') {
           log(`  SKIP (exists): ${outputName}.cbz`, 'skip');
           continue;

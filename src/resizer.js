@@ -35,53 +35,130 @@ function longPath(p) {
   return '\\\\?\\' + path.normalize(p);
 }
 
+// Device names 7-Zip prefixes with "_" when it extracts (the part before the
+// first ".", trailing spaces ignored).
+const DEVICE_7Z = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
 /**
- * The name 7-Zip gives an archive path when it extracts on Windows: a name
- * can't end in a space or a period there, so 7-Zip writes each such trailing
- * character as "_" — "Vol 1 \001.jpg" lands as "Vol 1_\001.jpg", "notes.txt "
- * as "notes.txt_".  (7-Zip has no switch to turn this off.)  A name made
- * only of spaces and periods ("..", "   ") is left as it is: 7-Zip treats
- * those differently, and such an archive keeps failing the exact-copy check.
+ * The name 7-Zip gives one path component when it extracts on Windows
+ * (checked against the vendored 7-Zip 26.03; it has no switch to turn this
+ * off):
+ *   • a character Windows can't hold — control characters, : * ? < > | " —
+ *     becomes "_"                                   ("a:b.txt" → "a_b.txt");
+ *   • each trailing space or period becomes "_"     ("Vol 1 " → "Vol 1_",
+ *     "..." → "___", "   " → "___");
+ *   • then a device name gets a leading "_"         ("con.txt" → "_con.txt";
+ *     "nul " became "nul_" first and is no longer one).
+ */
+function extractedName(c) {
+  let n = c.replace(/[\x00-\x1f:*?<>|"]/g, '_').replace(/[ .]+$/, (m) => '_'.repeat(m.length));
+  const dot = n.indexOf('.');
+  if (DEVICE_7Z.test((dot < 0 ? n : n.slice(0, dot)).replace(/ +$/, ''))) n = '_' + n;
+  return n;
+}
+
+/**
+ * The path 7-Zip extracts an archive path to (extractedName on every step),
+ * or null for a path with a "." or ".." step: 7-Zip drops those steps, and
+ * such an entry is not given its name back — the exact-copy check then fails
+ * and the original stays untouched.
  */
 function extractedPath(p) {
-  return p.split('\\').map((c) => c.replace(/([^ .])([ .]+)$/, (_, last, run) => last + '_'.repeat(run.length))).join('\\');
+  const parts = p.replace(/\//g, '\\').replace(/\\+$/, '').split('\\');
+  if (parts.some((c) => c === '' || c === '.' || c === '..')) return null;
+  return parts.map(extractedName).join('\\');
+}
+
+/**
+ * The first two entries of the original that extract to the same name:
+ *   • two files or folder entries on one path — "Vol 1 \001.jpg" and
+ *     "Vol 1_\001.jpg", "A.jpg" and "a.jpg" (Windows names ignore case), or
+ *     the same name twice;
+ *   • a file on the path of a folder — "CON" and "con\x.jpg" (both "_con").
+ * 7-Zip writes them as one (or fails on the second), so one of them is lost
+ * and no exact copy can be made.  Returns [pathA, pathB] or null.
+ */
+function extractCollision(sourceEntries) {
+  const onPath = new Map();   // extracted path (lower) → original path: files and folder entries
+  const files  = new Map();   // the same, files only
+  const inside = new Map();   // every folder an extracted path runs through (lower) → an original path in it
+  for (const e of sourceEntries) {
+    const x = extractedPath(e.path);
+    if (!x) continue;
+    const orig = e.path.replace(/\\+$/, '');
+    const k    = x.toLowerCase();
+    if (onPath.has(k)) return [onPath.get(k), orig];
+    onPath.set(k, orig);
+    if (!e.isDir) files.set(k, orig);
+    for (let i = k.lastIndexOf('\\'); i > 0; i = k.lastIndexOf('\\', i - 1)) {
+      if (!inside.has(k.slice(0, i))) inside.set(k.slice(0, i), orig);
+    }
+  }
+  for (const [k, orig] of files) if (inside.has(k)) return [orig, inside.get(k)];
+  return null;
+}
+
+/** The failure for a CBZ with an extractCollision. */
+function collisionError([a, b]) {
+  // PLACEHOLDER wording — Judy to check (ruling 23, item 4).
+  const message = `"${a}" and "${b}" get the same name when extracted on Windows, so this CBZ can't be resized.`;
+  return Object.assign(new Error(message), {
+    resizeFailure: { message, fix: 'Rename one of them inside the CBZ with an archive tool, then resize it again.' },
+  });
+}
+
+/**
+ * The original's listing, only to look for an extractCollision after 7-Zip
+ * failed to extract (a file and a folder that land on one name make it fail).
+ * Null when there is none or the listing can't be read.
+ */
+async function collisionIn(cbzPath, signal) {
+  try {
+    return extractCollision(await listEntries(longPath(cbzPath), signal));
+  } catch (err) {
+    if (err.name === 'AbortError' || signal?.aborted) throw err;
+    return null;
+  }
 }
 
 /**
  * The renames that give a repack its original's entry names back:
- * [packed path, original path] for every entry of the original that was
- * extracted only under 7-Zip's name for it (extractedPath).  Nothing is
- * guessed: a pair is made only when that name is in the repack, and never when
- * two entries of the original land on the same name ("Vol 1 \" and "Vol 1_\"
- * both extract into "Vol 1_\") — 7-Zip merged those, and the exact-copy check
- * must fail.  Windows names are case-insensitive, so the lookups are too.
+ * [packed path, original path] for every entry (file or folder entry) of the
+ * original that was extracted under another name (extractedPath).  A pair is
+ * made only when that name is in the repack; a name that can't be written on
+ * a listfile line (a line break) is left, and the exact-copy check fails.
+ * Call only when the original has no extractCollision.
  *
- * @param {Array<{path: string}>} sourceEntries  the original's listing
- * @param {string[]} packedPaths                 paths in the repack, relative
- * @returns {Array<[string, string]>}
+ * 7z rn gives each entry the FIRST pair that matches it, and a folder's pair
+ * also matches everything inside that folder: the pairs are sorted deepest
+ * first, so every entry meets its own pair before any folder's.
  */
-function restoreNamePairs(sourceEntries, packedPaths) {
-  const norm   = (p) => p.replace(/\//g, '\\').replace(/\\+$/, '');
+function restorePairs(sourceEntries, packedPaths) {
   const packed = new Map(packedPaths.map((p) => [p.toLowerCase(), p]));
-  const lands  = new Map();                        // name on disk (lower) → how many originals land there
+  const pairs  = [];
   for (const e of sourceEntries) {
-    const k = extractedPath(norm(e.path)).toLowerCase();
-    lands.set(k, (lands.get(k) || 0) + 1);
-  }
-  const pairs = [];
-  for (const e of sourceEntries) {
-    const want = norm(e.path);
+    const want = e.path.replace(/\//g, '\\').replace(/\\+$/, '');
     const got  = extractedPath(want);
-    if (got === want || packed.has(want.toLowerCase()) || /["\r\n]/.test(want)) continue;   // " / newline: no listfile line
-    const k = got.toLowerCase();
-    if (packed.has(k) && lands.get(k) === 1) pairs.push([packed.get(k), want]);
+    if (!got || got === want || /[\r\n]/.test(want)) continue;
+    const disk = packed.get(got.toLowerCase());
+    if (disk) pairs.push([disk, want]);
   }
-  return pairs;
+  const depth = (p) => p.split('\\').length;
+  return pairs.sort((a, b) => depth(b[1]) - depth(a[1]));
+}
+
+/**
+ * A 7z rn listfile: old and new names on alternate lines, each in quotes.
+ * 7-Zip trims a line and strips ONE pair of surrounding quotes, so a quote
+ * inside a name (legal in an archive, not on Windows) comes through.
+ */
+function renameListContent(pairs) {
+  return pairs.flat().map((n) => `"${n}"`).join('\n');
 }
 
 /**
  * Recursively list everything under `root`, returning paths RELATIVE to root.
- * Returns { images, others, emptyDirs }:
+ * Returns { images, others, emptyDirs, dirs }:
  *   images     – page files, naturally sorted by relative path so pages keep
  *                their reading order (root pages first, then each subfolder)
  *   others     – every other file (ComicInfo.xml, .jxl, .jfif, .txt, …),
@@ -90,13 +167,17 @@ function restoreNamePairs(sourceEntries, packedPaths) {
  *                entry when the folder itself is listed, and listing a
  *                non-empty folder would re-add its files, so only empty ones
  *                are listed; every other folder is implied by its files.
+ *   dirs       – every folder, so the original's explicit folder entries can
+ *                be listed too (step 6)
  */
 function collectTree(root) {
   const images    = [];
   const others    = [];
   const emptyDirs = [];
+  const dirs      = [];
   (function walk(dir, relDir) {
     const list = fs.readdirSync(dir, { withFileTypes: true });
+    if (relDir) dirs.push(relDir);
     if (list.length === 0 && relDir) emptyDirs.push(relDir);
     for (const e of list) {
       const rel = relDir ? path.join(relDir, e.name) : e.name;
@@ -109,7 +190,7 @@ function collectTree(root) {
   const byName = (a, b) => a.localeCompare(b, undefined, { numeric: true });
   images.sort(byName);
   others.sort(byName);
-  return { images, others, emptyDirs };
+  return { images, others, emptyDirs, dirs };
 }
 
 /** fsync a file so its data is on disk before it replaces anything. */
@@ -415,7 +496,13 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
           );
         } catch (err) {
           if (err.name === 'AbortError' || signal?.aborted) throw err;
-          if (err.code !== 1) throw err; // code 1 = non-fatal warnings — continue
+          if (err.code !== 1) {                // code 1 = non-fatal warnings — continue
+            // A file and a folder that extract to one name make 7-Zip fail
+            // here: say that, not 7-Zip's raw line.
+            const clash = await collisionIn(cbzPath, signal);
+            if (clash) throw collisionError(clash);
+            throw err;
+          }
           log(`Archive warning: ${(err.stderr?.trim() || err.message).split('\n')[0]}`, 'warn');
         }
 
@@ -482,15 +569,52 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         }
         await runBatch();
 
-        // 5. Pack all pages + everything carried over into a new temp CBZ via
+        // 5. Read the ORIGINAL's own listing: the resized copy is checked
+        //    against it (step 7), and it says which entries 7-Zip had to
+        //    extract under another name (step 6b) and which folder entries the
+        //    original has (step 6).  Reading it is its own failure: the
+        //    end-of-run block says so plainly instead of a raw exec error.
+        let sourceImageCount, sourceEntries;
+        try {
+          sourceImageCount = await countImageEntries(longPath(cbzPath), signal);
+          sourceEntries    = await listEntries(longPath(cbzPath), signal);
+        } catch (err) {
+          if (err.name === 'AbortError' || signal?.aborted) throw err;
+          err.resizeFailure = {
+            message: `"${path.basename(cbzPath)}" can't be read to check the resize against it.`,
+            fix: "Check that the file isn't corrupt or in use, then resize it again.",
+          };
+          throw err;
+        }
+        //    Two entries that extract to one name were written as one by
+        //    7-Zip: no exact copy can be made, so stop here and say why.
+        const clash = extractCollision(sourceEntries);
+        if (clash) throw collisionError(clash);
+
+        // 6. Pack all pages + everything carried over into a new temp CBZ via
         //    7-Zip store mode.  Relative paths keep the original folder tree.
+        //    The listfile names each of the ORIGINAL's entries by where it was
+        //    extracted (extractedPath), its folder entries included — 7-Zip
+        //    stores a listed folder as an entry and its files once — so the
+        //    copy has exactly the original's folder entries; a folder the
+        //    original only implies is not listed.  Anything else that was
+        //    extracted is listed after them, so the exact-copy check sees it.
+        //    (7-Zip writes the entries sorted by path, whatever the order.)
         //    The listfile lives OUTSIDE tmpDir (beside it, same cbz_ prefix
         //    so the startup sweep still removes it after a crash): inside, it
         //    could overwrite an archive entry of the same name, and it would
         //    itself be packed as an entry.
+        const extracted   = new Map([...allFiles, ...tree.others, ...tree.dirs].map((p) => [p.toLowerCase(), p]));
+        const packedPaths = [];
+        const listed      = new Set();
+        const list        = (p) => { if (!listed.has(p.toLowerCase())) { listed.add(p.toLowerCase()); packedPaths.push(p); } };
+        for (const e of sourceEntries) {
+          const d = extracted.get(extractedPath(e.path)?.toLowerCase());
+          if (d) list(d);
+        }
+        for (const p of [...allFiles, ...tree.others, ...tree.emptyDirs]) list(p);
         tmpCbz = path.join(tempRoot(), `cbz_resized_${crypto.randomBytes(6).toString('hex')}.cbz`);
-        const listPath    = `${tmpDir}.lst`;
-        const packedPaths = [...allFiles, ...tree.others, ...tree.emptyDirs];
+        const listPath = `${tmpDir}.lst`;
         fs.writeFileSync(listPath, listFileContent(packedPaths), 'utf8');
         try {
           await execFilePromise(
@@ -511,37 +635,16 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
           try { fs.unlinkSync(listPath); } catch {}
         }
 
-        // 6. Validate the new CBZ against the ORIGINAL CBZ itself — not against
-        //    what we extracted, which could never see an extraction shortfall
-        //    (a page-stripped copy validated and was offered as a replacement).
-        //    a) integrity (`7z t`) + the original's own image-entry count;
-        //    b) an exact-copy check of both listings: same file paths, same
-        //       folders, and the same size + CRC for every entry that was
-        //       not resized — so nothing is dropped, renamed or altered.
-        // Reading the ORIGINAL for the comparison is its own failure: the
-        // end-of-run block says so plainly instead of showing a raw exec error.
-        let sourceImageCount, sourceEntries;
-        try {
-          sourceImageCount = await countImageEntries(longPath(cbzPath), signal);
-          sourceEntries    = await listEntries(longPath(cbzPath), signal);
-        } catch (err) {
-          if (err.name === 'AbortError' || signal?.aborted) throw err;
-          err.resizeFailure = {
-            message: `"${path.basename(cbzPath)}" can't be read to check the resize against it.`,
-            fix: "Check that the file isn't corrupt or in use, then resize it again.",
-          };
-          throw err;
-        }
-        // 6b. An entry 7-Zip had to extract under another name (a name ending
-        //     in a space or a period: "Vol 1 \001.jpg" lands as
-        //     "Vol 1_\001.jpg" — extractedPath) was packed under that name.
+        // 6b. An entry 7-Zip had to extract under another name (extractedPath:
+        //     "Vol 1 \001.jpg" lands as "Vol 1_\001.jpg", "a:b.txt" as
+        //     "a_b.txt", "con.txt" as "_con.txt") was packed under that name.
         //     Rename it back inside the repack, so the replacement's entry
-        //     names are the original's, exactly; the exact-copy check below
-        //     then holds the repack to them.  Nothing to do for almost every CBZ.
-        const renames = restoreNamePairs(sourceEntries, packedPaths);
+        //     names are the original's, exactly; step 7 then holds the repack
+        //     to them.  Nothing to do for almost every CBZ.
+        const renames = restorePairs(sourceEntries, packedPaths);
         if (renames.length > 0) {
           const rnList = `${tmpDir}.rn.lst`;       // beside tmpDir, like the pack listfile
-          fs.writeFileSync(rnList, listFileContent(renames.flat()), 'utf8');
+          fs.writeFileSync(rnList, renameListContent(renames), 'utf8');
           try {
             await execFilePromise(sevenZip, sevenZipArgs('rn', ['-spd', `@${rnList}`], tmpCbz), signal);
           } finally {
@@ -550,10 +653,19 @@ async function startResize({ folder }, sendLog, sendProgress, signal, waitIfPaus
         }
         const restored = new Map(renames);
         const changed  = oversized.map((p) => restored.get(p) ?? p);   // resized pages, by their original names
+
+        // 7. Validate the new CBZ against the ORIGINAL CBZ itself — not against
+        //    what we extracted, which could never see an extraction shortfall
+        //    (a page-stripped copy validated and was offered as a replacement).
+        //    a) integrity (`7z t`) + the original's own image-entry count;
+        //    b) an exact-copy check of both listings: the same file paths,
+        //       the same folder entries (exactFolders), and the same size +
+        //       CRC for every entry that was not resized — so nothing is
+        //       dropped, renamed, added or altered.
         let { valid, reason } = await validateCbz(tmpCbz, sourceImageCount);
         if (valid) {
           const outputEntries = await listEntries(tmpCbz, signal);
-          ({ valid, reason } = compareEntries(sourceEntries, outputEntries, changed));
+          ({ valid, reason } = compareEntries(sourceEntries, outputEntries, changed, 'resized copy', { exactFolders: true }));
         }
         if (!valid) {
           log(`Validation failed: ${reason}`, 'error');

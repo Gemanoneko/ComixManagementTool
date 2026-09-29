@@ -89,7 +89,9 @@ async function listEntries(archivePath, signal) {
  *     can never be reproduced from one extracted file, so it fails too);
  *   • the same folders — explicit folder entries plus every folder implied by
  *     a path.  7-Zip writes no explicit entry for a folder that has files in
- *     it, so only the implied set is comparable between the two archives;
+ *     it unless that folder is listed, so by default only the implied set is
+ *     compared; with `exactFolders` (Resize, which lists the original's
+ *     folder entries) the explicit folder entries must match too;
  *   • the same size, and the same CRC where the source stores one, for every
  *     file that was not changed.
  *
@@ -106,17 +108,20 @@ async function listEntries(archivePath, signal) {
  * the resized copy.).  `sourceEntries`
  * may carry `crc: null` (a folder on disk has no stored CRC) — then only the
  * size is compared.  `noun` names the copy in the messages.
+ * `opts.exactFolders`: an explicit folder entry on one side only is a missing
+ * or unexpected folder, even when the other side implies that folder.
  *
  * @param {Array<{path:string,isDir:boolean,size:number|null,crc:string|null}>} sourceEntries
  * @param {Array<{path:string,isDir:boolean,size:number|null,crc:string|null}>} outputEntries
  * @param {Iterable<string>} changedPaths  paths (relative, either separator) whose content may differ
  * @param {string} [noun]
+ * @param {{ exactFolders?: boolean }} [opts]
  * @returns {{ valid: boolean, reason?: string,
  *             problems: Array<{ path: string,
  *               cause: 'missing'|'size'|'content'|'extra'|'missing-folder'|'extra-folder',
  *               sourceSize?: number, outputSize?: number }> }}   (sizes on 'size' records)
  */
-function compareEntries(sourceEntries, outputEntries, changedPaths, noun = 'resized copy') {
+function compareEntries(sourceEntries, outputEntries, changedPaths, noun = 'resized copy', { exactFolders = false } = {}) {
   const key = (p) => p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
   const changed = new Set([...changedPaths].map(key));
 
@@ -155,6 +160,13 @@ function compareEntries(sourceEntries, outputEntries, changedPaths, noun = 'resi
   }
   const missingFolders = [...src.folders].filter(([k]) => !out.folders.has(k)).map(([, d]) => d);
   const extraFolders   = [...out.folders].filter(([k]) => !src.folders.has(k)).map(([, d]) => d);
+  if (exactFolders) {
+    const explicit = (entries) => new Map(entries.filter((e) => e.isDir)
+      .map((e) => [key(e.path), e.path.replace(/\//g, '\\').replace(/\\+$/, '')]));
+    const se = explicit(sourceEntries), oe = explicit(outputEntries);
+    for (const [k, d] of se) if (!oe.has(k) && out.folders.has(k)) missingFolders.push(d);
+    for (const [k, d] of oe) if (!se.has(k) && src.folders.has(k)) extraFolders.push(d);
+  }
 
   const problems = [
     ...missing.map((p) => ({ path: p, cause: 'missing' })),
