@@ -217,3 +217,19 @@ These are text and UX fixes only. Every item not listed here stays as it is.
     2. **Resize replacement keeps explicit folder entries,** so its entry list equals the original's exactly.
     3. **Resize handles names 7-Zip renames on extraction:** invalid characters (`a:b.txt`), device names (`con.txt`), and names made only of spaces or periods. The replacement keeps the original names, as ruling 22 did for trailing spaces.
     4. **The merge-case resize error** ("Image count mismatch" when two names merge during extraction) gets a clear message. Judy checks the wording.
+24. **An existing CBZ with the target name but different pages** (for example, it was resized later, or ImageMagick changed) makes **that file fail with a clear message**. Nothing is written and nothing is offered for delete. There is no " (n)" numbering, which replaces the numbering from Ender's ruling-23 fix. Judy writes the message.
+25. **After a Cancel, originals that were never reached must not appear in the manual-review list** (the one with Delete and Delete All), since none of their pages are in a CBZ.
+
+## Judy's wording for rulings 23 and 24
+**Convert: an existing CBZ doesn't match.** One message frame and one Fix line cover both cases: the existing CBZ fails its check, or it opens fine but its pages differ. Reuse the `existing-mismatch` cause.
+- For different pages, the message is `An existing "<name>.cbz" doesn't match this file — its pages differ from this file's.` When the existing CBZ fails its check, it keeps `An existing "<name>.cbz" doesn't match this file — <inner reason>.`
+- Shared Fix line, for both: `Move or rename the existing "<name>.cbz", then convert again.` This replaces the old "Move or delete … yourself … this file again".
+- Log line for the pages-differ path: `  ERROR: Existing <name>.cbz doesn't match this file — its pages differ from this file's`. Don't reuse "failed validation" here.
+- Drop the ruling-23 `Note: … using "Foo (1).cbz"` line. Numbering is gone.
+
+**Resize: two entries get the same name when extracted.**
+- Two different names: keep `"<a>" and "<b>" get the same name when extracted on Windows, so this CBZ can't be resized.`
+- The same name twice: `This CBZ holds "<a>" twice, so it can't be resized.`
+- A file and the folder holding another entry: `File "<a>" and the folder holding "<b>" get the same name when extracted on Windows, so this CBZ can't be resized.` `extractCollision` must return the kind.
+- The Fix line stays: `Rename one of them inside the CBZ with an archive tool, then resize it again.` Futaba checks that an archive tool can actually rename one of two identical entries.
+- Remove the `PLACEHOLDER wording` comments.
