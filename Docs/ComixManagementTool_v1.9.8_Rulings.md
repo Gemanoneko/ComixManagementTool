@@ -233,3 +233,30 @@ These are text and UX fixes only. Every item not listed here stays as it is.
 - A file and the folder holding another entry: `File "<a>" and the folder holding "<b>" get the same name when extracted on Windows, so this CBZ can't be resized.` `extractCollision` must return the kind.
 - The Fix line stays: `Rename one of them inside the CBZ with an archive tool, then resize it again.` Futaba checks that an archive tool can actually rename one of two identical entries.
 - Remove the `PLACEHOLDER wording` comments.
+
+## Sergei's release instruction (2026-09-29, before leaving)
+26. **Fix the four remaining old issues from Ender's `ed1461e` report,** then run QA and release v1.10.0. The four issues:
+    1. The nested-archive exception, where a file leaves its own earlier outputs before failing.
+    2. The early check misses the fix-A path, where a different page count lets the file write its earlier outputs first.
+    3. The summary line's "validation failed" wording. Judy writes it.
+    4. Resize entry order. If 7-Zip can't do it, record the evidence and move on.
+
+    **Sergei's words:** "stop release only for very important stuff. I'd like to have release in git when I'm back."
+    - **Stop:** a Futaba **Blocker** or a Senua **Critical** (or safety floor) stops the release and waits for Sergei.
+    - **Everything else ships:** Majors and Minors are recorded for Sergei's return. The fix for a Blocker or Critical is not fired without him.
+
+## Judy's Conversion Summary wording (ruling 26, item 3)
+The summary line keeps its current shape: `  ✗  <rel>  →  <text>`. Branch on `result.failure?.cause`; an unknown cause keeps the current template.
+- **Existing CBZ doesn't match:**
+  - When its pages differ: `existing X.cbz doesn't match this file — its pages differ from this file's`
+  - When the existing CBZ fails its own check: `existing X.cbz doesn't match this file — <inner>`
+- **nested-failed:** `Y.zip inside it didn't convert or validate`, plus ` (+N more)` when N is more than 0.
+- **pages-lost:** `3 of 40 pages aren't in a validated CBZ`. The noun agrees with the total (`1 of 1 page`); the verb agrees with the lost count (`1 of 40 pages isn't`).
+- **cbz-count-mismatch:** `validation failed — X.cbz has 20 pages, expected 24`. Use "1 page" when the count is 1.
+- **cbz-integrity:** `validation failed — X.cbz is corrupt`
+- **cbz-no-images:** `validation failed — X.cbz has no pages`
+- **cbz-unlistable:** `validation failed — couldn't read back X.cbz`
+- **cbz-7zip-missing:** `validation failed — 7-Zip is missing from this install`
+- **Unchanged:** unknown `cbz-*` causes, `no images found`, `ERROR: …`, and `failed`.
+
+The same plural rule, and a period after the "(+N more)" parenthesis instead of before it, also apply to the matching lines in the failure block (`describeConvertFailure`). Those two are violations of rules already made. Judy's third failure-block note ("doesn't match … Image count mismatch") is listed for Sergei and not done.
