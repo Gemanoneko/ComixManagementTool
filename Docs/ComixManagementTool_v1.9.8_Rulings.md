@@ -212,3 +212,8 @@ These are text and UX fixes only. Every item not listed here stays as it is.
 22. **Fix the trailing-space folder problems in v1.10.0, before QA:**
     - No folder the app creates may end in a space. This covers the unwrap folder (`Foo .cbz`), Convert's wrapper folder, and the folder-pack rename.
     - Resizing an archive that contains a folder ending in a space must work, not fail with "Missing from resized copy".
+23. **Fix all four old issues from Ender's ruling-22 report in v1.10.0, before QA:**
+    1. **Possible data loss.** `Foo.zip` and `Foo .zip` share the output folder `Foo\`, and a same-named CBZ already in that folder is treated as already converted. An original must never be offered for delete unless its own pages are in a CBZ validated against it. Give Convert's wrapper and split folders conflict numbering, or an equivalent guarantee.
+    2. **Resize replacement keeps explicit folder entries,** so its entry list equals the original's exactly.
+    3. **Resize handles names 7-Zip renames on extraction:** invalid characters (`a:b.txt`), device names (`con.txt`), and names made only of spaces or periods. The replacement keeps the original names, as ruling 22 did for trailing spaces.
+    4. **The merge-case resize error** ("Image count mismatch" when two names merge during extraction) gets a clear message. Judy checks the wording.
