@@ -123,3 +123,4 @@ Bump `version` in `package.json` automatically after every code change, before c
 - Natural sort (`localeCompare` with `numeric: true`) is applied to image filenames before packing so pages read in order.
 - Never delete or overwrite an original until its CBZ has passed validation.
 - PDF pages output as `basename_0000.png … basename_NNNN.png` at 300 DPI, lossless PNG.
+- Disk hygiene: verified disposable output (probes, exports, logs, task-local caches) is cleaned at task completion and handoff, preserving unique sources and unresolved evidence — see the studio's `Team/Docs/ProcessRules.md` § Routine disk hygiene.
